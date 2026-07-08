@@ -1,5 +1,5 @@
 import { startSnipOverlay } from './snip-overlay';
-import { showResultPanel, showErrorToast } from './result-panel';
+import { showResultPanel, showErrorToast, updateStreamingAnswer } from './result-panel';
 import type { AnthropicMessage, BgToCsMessage, DisplayMessage, Rect } from '../lib/messages';
 
 declare global {
@@ -16,6 +16,7 @@ let currentDataUrl = '';
 let lastRect: Rect | undefined;
 let lastHint: string | undefined;
 let retryLastRequest: (() => void) | null = null;
+let awaitingResponse = false;
 
 function resetSessionState(): void {
   isPanelOpen = false;
@@ -25,6 +26,7 @@ function resetSessionState(): void {
   currentDataUrl = '';
   lastRect = undefined;
   retryLastRequest = null;
+  awaitingResponse = false;
 }
 
 function cleanup(): void {
@@ -54,6 +56,7 @@ function renderPanel(state: { pending: boolean; error?: string; errorCode?: stri
 }
 
 function stopGeneration(): void {
+  awaitingResponse = false;
   chrome.runtime.sendMessage({ type: 'CANCEL_GENERATION' });
   renderPanel({ pending: false });
 }
@@ -71,6 +74,7 @@ function sendAnalyze(prompt?: string): void {
     renderPanel({ pending: true });
     sendAnalyze(prompt);
   };
+  awaitingResponse = true;
   chrome.runtime.sendMessage({
     type: 'ANALYZE',
     dataUrl: currentDataUrl,
@@ -95,11 +99,15 @@ function handleFollowUp(text: string): void {
   }
 
   const history = conversationHistory;
-  retryLastRequest = () => {
-    renderPanel({ pending: true });
+  const sendFollowUp = () => {
+    awaitingResponse = true;
     chrome.runtime.sendMessage({ type: 'FOLLOW_UP', text, history, screenshotId: id });
   };
-  chrome.runtime.sendMessage({ type: 'FOLLOW_UP', text, history, screenshotId: id });
+  retryLastRequest = () => {
+    renderPanel({ pending: true });
+    sendFollowUp();
+  };
+  sendFollowUp();
 }
 
 function beginSnip(hintText?: string): void {
@@ -141,9 +149,15 @@ if (!window.__snapscreenListenerReady) {
         sendAnalyze();
         break;
 
+      case 'ANALYZE_CHUNK':
+        if (!isActiveSession(message.screenshotId) || !awaitingResponse) return;
+        updateStreamingAnswer(message.text);
+        break;
+
       case 'ANALYZE_RESULT': {
         if (!isActiveSession(message.screenshotId)) return;
 
+        awaitingResponse = false;
         conversationHistory = message.history ?? conversationHistory;
         if (displayMessages.length === 0 && message.prompt) {
           displayMessages = [...displayMessages, { role: 'user', content: message.prompt }];
@@ -155,6 +169,7 @@ if (!window.__snapscreenListenerReady) {
 
       case 'ANALYZE_ERROR':
         if (!isActiveSession(message.screenshotId)) return;
+        awaitingResponse = false;
         renderPanel({ pending: false, error: message.message, errorCode: message.code });
         break;
 

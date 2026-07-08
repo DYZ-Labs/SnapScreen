@@ -17,11 +17,14 @@ export class AnthropicError extends Error {
   }
 }
 
+export type DeltaHandler = (textSoFar: string) => void;
+
 export async function analyzeImage(
   apiKey: string,
   dataUrl: string,
   prompt: string,
   signal?: AbortSignal,
+  onDelta?: DeltaHandler,
 ): Promise<{ text: string; history: AnthropicMessage[] }> {
   const base64 = dataUrlToBase64(dataUrl);
 
@@ -38,7 +41,7 @@ export async function analyzeImage(
   ];
 
   const messages: AnthropicMessage[] = [{ role: 'user', content: userContent }];
-  const text = await callApi(apiKey, messages, SCREENSHOT_QA_SYSTEM_PROMPT, signal);
+  const text = await callApi(apiKey, messages, SCREENSHOT_QA_SYSTEM_PROMPT, signal, onDelta);
 
   return {
     text,
@@ -51,13 +54,14 @@ export async function followUp(
   text: string,
   history: AnthropicMessage[],
   signal?: AbortSignal,
+  onDelta?: DeltaHandler,
 ): Promise<{ text: string; history: AnthropicMessage[] }> {
   const messages: AnthropicMessage[] = [
     ...history,
     { role: 'user', content: text },
   ];
 
-  const answer = await callApi(apiKey, messages, FOLLOW_UP_SYSTEM_PROMPT, signal);
+  const answer = await callApi(apiKey, messages, FOLLOW_UP_SYSTEM_PROMPT, signal, onDelta);
 
   return {
     text: answer,
@@ -83,6 +87,7 @@ async function callApi(
   messages: AnthropicMessage[],
   system: string,
   signal?: AbortSignal,
+  onDelta?: DeltaHandler,
 ): Promise<string> {
   const response = await postToApi(
     apiKey,
@@ -93,31 +98,91 @@ async function callApi(
       // entirely to the visible response.
       thinking: { type: 'disabled' },
       output_config: { effort: 'low' },
+      stream: true,
       system,
       messages,
     },
     signal,
   );
 
-  const data = (await response.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-    stop_reason?: string;
-  };
+  const { text, stopReason } = await readSseStream(response, onDelta);
 
-  if (data.stop_reason === 'refusal') {
+  if (stopReason === 'refusal') {
     throw new AnthropicError('refusal', 'Claude declined to answer this question.');
   }
 
-  const text = data.content?.find((b) => b.type === 'text')?.text;
   if (!text) {
     throw new AnthropicError('api', 'No response text received from the API.');
   }
 
   const cleaned = stripMarkdown(text);
-  if (data.stop_reason === 'max_tokens') {
+  if (stopReason === 'max_tokens') {
     return `${cleaned}\n\n(Answer was cut off — ask a follow-up to continue.)`;
   }
   return cleaned;
+}
+
+async function readSseStream(
+  response: Response,
+  onDelta?: DeltaHandler,
+): Promise<{ text: string; stopReason?: string }> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new AnthropicError('api', 'No response stream received from the API.');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let stopReason: string | undefined;
+
+  const handleEvent = (rawEvent: string): void => {
+    const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data:'));
+    if (!dataLine) return;
+
+    let data: {
+      type?: string;
+      delta?: { type?: string; text?: string; stop_reason?: string };
+      error?: { message?: string };
+    };
+    try {
+      data = JSON.parse(dataLine.slice(5).trim());
+    } catch {
+      return;
+    }
+
+    switch (data.type) {
+      case 'content_block_delta':
+        if (data.delta?.type === 'text_delta' && typeof data.delta.text === 'string') {
+          text += data.delta.text;
+          onDelta?.(stripMarkdown(text));
+        }
+        break;
+      case 'message_delta':
+        if (data.delta?.stop_reason) {
+          stopReason = data.delta.stop_reason;
+        }
+        break;
+      case 'error':
+        throw new AnthropicError('api', data.error?.message ?? 'The API stream reported an error.');
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let separator: number;
+    while ((separator = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      handleEvent(rawEvent);
+    }
+  }
+
+  return { text, stopReason };
 }
 
 async function postToApi(

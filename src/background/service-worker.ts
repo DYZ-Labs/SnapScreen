@@ -32,6 +32,22 @@ function finishGeneration(tabId: number, controller: AbortController): void {
   }
 }
 
+function makeDeltaRelay(
+  tabId: number,
+  screenshotId: string,
+  controller: AbortController,
+): (textSoFar: string) => void {
+  return (textSoFar) => {
+    if (controller.signal.aborted) return;
+    chrome.tabs
+      .sendMessage(tabId, { type: 'ANALYZE_CHUNK', text: textSoFar, screenshotId })
+      .catch(() => {
+        // Tab navigated away or closed mid-stream — final result handling
+        // will surface any real error.
+      });
+  };
+}
+
 function isRestrictedUrl(url?: string): boolean {
   if (!url) return true;
   return RESTRICTED_PREFIXES.some((prefix) => url.startsWith(prefix));
@@ -195,6 +211,7 @@ chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendRespon
               message.dataUrl,
               prompt,
               controller.signal,
+              makeDeltaRelay(tabId, screenshotId, controller),
             );
 
             if (controller.signal.aborted) {
@@ -243,6 +260,7 @@ chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendRespon
               message.text,
               message.history,
               controller.signal,
+              makeDeltaRelay(tabId, screenshotId, controller),
             );
 
             if (controller.signal.aborted) {

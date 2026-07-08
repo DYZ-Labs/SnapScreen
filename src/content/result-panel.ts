@@ -633,6 +633,34 @@ function positionPanel(panel: HTMLElement, anchorRect?: Rect): void {
   requestAnimationFrame(() => ensurePanelInViewport(panel, preferred));
 }
 
+/**
+ * Incrementally renders the in-progress answer while the API streams.
+ * The final ANALYZE_RESULT re-render replaces this bubble with the
+ * permanent one (including its copy button).
+ */
+export function updateStreamingAnswer(text: string): void {
+  const root = document.getElementById(PANEL_ID);
+  const body = root?.querySelector('.snapscreen-panel-body');
+  if (!body) return;
+
+  let thread = body.querySelector('.snapscreen-chat-thread');
+  if (!thread) {
+    thread = document.createElement('div');
+    thread.className = 'snapscreen-chat-thread';
+    body.prepend(thread);
+  }
+
+  let bubble = thread.querySelector('.snapscreen-msg-streaming');
+  if (!bubble) {
+    bubble = document.createElement('div');
+    bubble.className = 'snapscreen-msg snapscreen-msg-assistant snapscreen-msg-streaming';
+    thread.append(bubble);
+  }
+
+  bubble.textContent = text;
+  body.scrollTop = body.scrollHeight;
+}
+
 export function showErrorToast(message: string): void {
   const toast = document.createElement('div');
   toast.id = TOAST_ID;

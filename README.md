@@ -8,7 +8,8 @@ A Chrome extension that turns any on-screen question into an instant answer usin
 - **Region selection** — drag a rectangle over any visible area
 - **AI analysis** — sends the capture to Claude's vision API with your question
 - **Follow-up questions** — ask more about the same screenshot without re-capturing
-- **Dark UI** — the in-page answer panel uses a dark theme; the settings page adapts to your system theme
+- **Streaming answers** — responses appear word by word as they're generated
+- **Dark & light mode** — the answer panel and settings page adapt to your system theme
 
 ## Setup
 

@@ -68,10 +68,22 @@
   --snapscreen-accent-glow: rgba(108, 92, 231, 0.5);
   --snapscreen-accent-ring: rgba(108, 92, 231, 0.25);
   --snapscreen-text-primary: #ececec;
+  --snapscreen-text-secondary: #9ca3af;
   --snapscreen-text-on-accent: #ffffff;
   --snapscreen-question-card-bg: #f5f5f5;
   --snapscreen-question-card-text: #1a1a1a;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  --snapscreen-border: rgba(255, 255, 255, 0.1);
+  --snapscreen-border-subtle: rgba(255, 255, 255, 0.06);
+  --snapscreen-composer-border: rgba(255, 255, 255, 0.12);
+  --snapscreen-hover-bg: rgba(255, 255, 255, 0.08);
+  --snapscreen-image-bg: #2a2a2a;
+  --snapscreen-scrollbar: rgba(255, 255, 255, 0.2);
+  --snapscreen-spinner-track: #404040;
+  --snapscreen-error: #f87171;
+  --snapscreen-success: #34d399;
+  --snapscreen-send-idle-bg: #404040;
+  --snapscreen-send-idle-fg: #6b7280;
+  border: 1px solid var(--snapscreen-border);
   background: var(--snapscreen-panel-shell);
   color: var(--snapscreen-text-primary);
   color-scheme: dark;
@@ -80,6 +92,32 @@
     0 2px 8px rgba(0, 0, 0, 0.3);
   font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   overflow: hidden;
+}
+
+@media (prefers-color-scheme: light) {
+  .snapscreen-panel {
+    --snapscreen-panel-shell: #ffffff;
+    --snapscreen-panel-bg: #ffffff;
+    --snapscreen-text-primary: #1a1a1a;
+    --snapscreen-text-secondary: #6b7280;
+    --snapscreen-question-card-bg: #f0f0f0;
+    --snapscreen-question-card-text: #1a1a1a;
+    --snapscreen-border: rgba(0, 0, 0, 0.12);
+    --snapscreen-border-subtle: rgba(0, 0, 0, 0.07);
+    --snapscreen-composer-border: rgba(0, 0, 0, 0.16);
+    --snapscreen-hover-bg: rgba(0, 0, 0, 0.06);
+    --snapscreen-image-bg: #f3f4f6;
+    --snapscreen-scrollbar: rgba(0, 0, 0, 0.25);
+    --snapscreen-spinner-track: #d1d5db;
+    --snapscreen-error: #dc2626;
+    --snapscreen-success: #059669;
+    --snapscreen-send-idle-bg: #e5e7eb;
+    --snapscreen-send-idle-fg: #9ca3af;
+    color-scheme: light;
+    box-shadow:
+      0 12px 40px rgba(0, 0, 0, 0.18),
+      0 2px 8px rgba(0, 0, 0, 0.1);
+  }
 }
 
 /* ── Header ── */
@@ -124,7 +162,7 @@ html.snapscreen-panel-dragging * {
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
-  color: #ffffff;
+  color: var(--snapscreen-text-primary);
 }
 
 .snapscreen-header-actions {
@@ -144,15 +182,15 @@ html.snapscreen-panel-dragging * {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--snapscreen-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s, color 0.15s;
 }
 
 .snapscreen-close-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #ececec;
+  background: var(--snapscreen-hover-bg);
+  color: var(--snapscreen-text-primary);
 }
 
 /* ── Screenshot preview ── */
@@ -162,8 +200,8 @@ html.snapscreen-panel-dragging * {
   width: 100%;
   padding: 0;
   border: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: #2a2a2a;
+  border-bottom: 1px solid var(--snapscreen-border-subtle);
+  background: var(--snapscreen-image-bg);
   cursor: zoom-in;
   flex-shrink: 0;
   transition: opacity 0.15s;
@@ -280,7 +318,7 @@ html.snapscreen-panel-dragging * {
   padding: 14px 16px;
   background: var(--snapscreen-panel-bg);
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+  scrollbar-color: var(--snapscreen-scrollbar) transparent;
 }
 
 .snapscreen-panel-body::-webkit-scrollbar {
@@ -288,7 +326,7 @@ html.snapscreen-panel-dragging * {
 }
 
 .snapscreen-panel-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--snapscreen-scrollbar);
   border-radius: 3px;
 }
 
@@ -319,7 +357,7 @@ html.snapscreen-panel-dragging * {
   background: transparent;
   padding-left: 0;
   padding-right: 0;
-  color: #FFFFFF;
+  color: var(--snapscreen-text-primary);
 }
 
 .snapscreen-msg-assistant-wrap {
@@ -339,19 +377,19 @@ html.snapscreen-panel-dragging * {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #9ca3af;
+  color: var(--snapscreen-text-secondary);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .snapscreen-copy-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #ececec;
+  background: var(--snapscreen-hover-bg);
+  color: var(--snapscreen-text-primary);
 }
 
 .snapscreen-copy-btn-copied,
 .snapscreen-copy-btn-copied:hover {
-  color: #34d399;
+  color: var(--snapscreen-success);
 }
 
 .snapscreen-pending {
@@ -364,10 +402,10 @@ html.snapscreen-panel-dragging * {
 
 .snapscreen-stop-btn {
   padding: 4px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--snapscreen-composer-border);
   border-radius: 999px;
   background: transparent;
-  color: #ececec;
+  color: var(--snapscreen-text-primary);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -375,12 +413,12 @@ html.snapscreen-panel-dragging * {
 }
 
 .snapscreen-stop-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.35);
+  background: var(--snapscreen-hover-bg);
+  border-color: var(--snapscreen-text-secondary);
 }
 
 .snapscreen-error {
-  color: #f87171;
+  color: var(--snapscreen-error);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -389,7 +427,7 @@ html.snapscreen-panel-dragging * {
 .snapscreen-spinner {
   width: 20px;
   height: 20px;
-  border: 2px solid #404040;
+  border: 2px solid var(--snapscreen-spinner-track);
   border-top-color: var(--snapscreen-accent);
   border-radius: 50%;
   animation: snapscreen-spin 0.7s linear infinite;
@@ -407,7 +445,7 @@ html.snapscreen-panel-dragging * {
 .snapscreen-panel .snapscreen-panel-footer {
   flex-shrink: 0;
   padding: 10px 12px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--snapscreen-border-subtle);
   background-color: var(--snapscreen-panel-bg);
 }
 
@@ -417,7 +455,7 @@ html.snapscreen-panel-dragging * {
   align-items: center;
   gap: 6px;
   padding: 6px 8px 8px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--snapscreen-composer-border);
   border-radius: 24px;
   background-color: var(--snapscreen-panel-bg);
   color-scheme: inherit;
@@ -461,8 +499,8 @@ html.snapscreen-panel-dragging * {
   font: inherit;
   outline: none;
   color-scheme: inherit;
-  color: #ffffff !important;
-  caret-color: #ffffff;
+  color: var(--snapscreen-text-primary) !important;
+  caret-color: var(--snapscreen-text-primary);
 }
 
 .snapscreen-panel .snapscreen-composer:not(.snapscreen-composer-multiline) textarea.snapscreen-input {
@@ -486,8 +524,8 @@ html.snapscreen-panel-dragging * {
 .snapscreen-panel textarea.snapscreen-input:-webkit-autofill:hover,
 .snapscreen-panel textarea.snapscreen-input:-webkit-autofill:focus {
   -webkit-box-shadow: 0 0 0 1000px var(--snapscreen-panel-bg) inset;
-  -webkit-text-fill-color: #ffffff;
-  caret-color: #ffffff;
+  -webkit-text-fill-color: var(--snapscreen-text-primary);
+  caret-color: var(--snapscreen-text-primary);
   transition: background-color 5000s ease-in-out 0s;
 }
 
@@ -501,8 +539,8 @@ html.snapscreen-panel-dragging * {
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: #404040;
-  color: #6b7280;
+  background: var(--snapscreen-send-idle-bg);
+  color: var(--snapscreen-send-idle-fg);
   cursor: not-allowed;
   transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }

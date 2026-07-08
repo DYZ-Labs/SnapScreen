@@ -25,6 +25,7 @@ export type DisplayMessage = {
 export type BgToCsMessage =
   | { type: 'START_SNIP'; hasApiKey: boolean }
   | { type: 'CROPPED_IMAGE'; dataUrl: string }
+  | { type: 'ANALYZE_CHUNK'; text: string; screenshotId: string }
   | {
       type: 'ANALYZE_RESULT';
       text: string;
