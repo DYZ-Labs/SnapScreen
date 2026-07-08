@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SnapScreen Settings</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>SnapScreen Settings</h1>
+      <p class="subtitle">
+        Configure your Anthropic API key and default analysis prompt.
+      </p>
+
+      <form id="settings-form">
+        <label for="api-key">Anthropic API Key</label>
+        <input
+          type="password"
+          id="api-key"
+          name="apiKey"
+          placeholder="sk-ant-…"
+          autocomplete="off"
+        />
+        <p class="hint">
+          Get a key from the
+          <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer"
+            >Anthropic Console</a
+          >. Stored locally on this device only.
+        </p>
+
+        <label for="default-prompt">Default Prompt</label>
+        <textarea
+          id="default-prompt"
+          name="defaultPrompt"
+          rows="3"
+          placeholder="Answer the question shown in this screenshot."
+        ></textarea>
+
+        <div class="actions">
+          <button type="submit" class="btn-primary">Save</button>
+          <span id="status" class="status" hidden></span>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="./options.ts"></script>
+  </body>
+</html>
