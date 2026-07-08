@@ -15,13 +15,18 @@
 
       <form id="settings-form">
         <label for="api-key">Anthropic API Key</label>
-        <input
-          type="password"
-          id="api-key"
-          name="apiKey"
-          placeholder="sk-ant-…"
-          autocomplete="off"
-        />
+        <div class="input-row">
+          <input
+            type="password"
+            id="api-key"
+            name="apiKey"
+            placeholder="sk-ant-…"
+            autocomplete="off"
+          />
+          <button type="button" id="toggle-key" class="btn-secondary" aria-label="Show API key" aria-pressed="false">
+            Show
+          </button>
+        </div>
         <p class="hint">
           Get a key from the
           <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer"
@@ -39,9 +44,20 @@
 
         <div class="actions">
           <button type="submit" class="btn-primary">Save</button>
+          <button type="button" id="test-key" class="btn-secondary">Test key</button>
           <span id="status" class="status" hidden></span>
         </div>
       </form>
+
+      <section class="shortcut-section">
+        <h2>Keyboard shortcut</h2>
+        <p class="hint">
+          Start a snip with <kbd id="shortcut-display">…</kbd> ·
+          <button type="button" id="open-shortcuts" class="btn-link">
+            Change in Chrome settings
+          </button>
+        </p>
+      </section>
     </main>
     <script type="module" src="./options.ts"></script>
   </body>

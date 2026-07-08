@@ -31,7 +31,11 @@ export function startSnipOverlay(options: SnipOverlayOptions): void {
   hint.className = 'snapscreen-hint';
   hint.textContent = options.hintText ?? 'Drag to select a region · Click to cancel';
 
-  root.append(dim, selection, hint);
+  const sizeBadge = document.createElement('div');
+  sizeBadge.className = 'snapscreen-size-badge';
+  sizeBadge.hidden = true;
+
+  root.append(dim, selection, sizeBadge, hint);
   document.documentElement.append(root);
 
   let startX = 0;
@@ -44,6 +48,11 @@ export function startSnipOverlay(options: SnipOverlayOptions): void {
     selection.style.top = `${y}px`;
     selection.style.width = `${w}px`;
     selection.style.height = `${h}px`;
+
+    sizeBadge.hidden = false;
+    sizeBadge.textContent = `${Math.round(w)} × ${Math.round(h)}`;
+    sizeBadge.style.left = `${Math.min(x + w + 8, window.innerWidth - 90)}px`;
+    sizeBadge.style.top = `${Math.min(y + h + 8, window.innerHeight - 30)}px`;
   }
 
   function onMouseDown(e: MouseEvent): void {

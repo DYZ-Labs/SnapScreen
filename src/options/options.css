@@ -114,6 +114,96 @@ a {
   background: #2563eb;
 }
 
+.btn-secondary {
+  padding: 10px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn-secondary {
+    border-color: #404040;
+  }
+
+  .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.btn-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #3b82f6;
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.input-row input {
+  flex: 1;
+}
+
+.input-row .btn-secondary {
+  flex-shrink: 0;
+  padding-block: 0;
+  font-size: 13px;
+}
+
+.shortcut-section {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid #e5e7eb;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shortcut-section {
+    border-top-color: #333;
+  }
+}
+
+.shortcut-section h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+kbd {
+  padding: 2px 6px;
+  border: 1px solid #d1d5db;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #fff;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  kbd {
+    background: #1e1e1e;
+    border-color: #404040;
+  }
+}
+
 .status {
   font-size: 13px;
   color: #16a34a;

@@ -85,6 +85,7 @@ async function showPageToast(tabId: number, message: string): Promise<void> {
 
 async function startSnip(tabId: number): Promise<void> {
   try {
+    const settings = await getSettings();
     await chrome.scripting.executeScript({
       target: { tabId },
       files: [contentScript],
@@ -93,7 +94,10 @@ async function startSnip(tabId: number): Promise<void> {
       target: { tabId },
       css: contentCss,
     });
-    await chrome.tabs.sendMessage(tabId, { type: 'START_SNIP' });
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'START_SNIP',
+      hasApiKey: Boolean(settings.apiKey),
+    });
   } catch {
     await showPageToast(
       tabId,

@@ -65,12 +65,66 @@ export async function followUp(
   };
 }
 
+export async function verifyApiKey(apiKey: string, signal?: AbortSignal): Promise<void> {
+  await postToApi(
+    apiKey,
+    {
+      model: MODEL,
+      max_tokens: 1,
+      thinking: { type: 'disabled' },
+      messages: [{ role: 'user', content: 'Hi' }],
+    },
+    signal,
+  );
+}
+
 async function callApi(
   apiKey: string,
   messages: AnthropicMessage[],
   system: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  const response = await postToApi(
+    apiKey,
+    {
+      model: MODEL,
+      max_tokens: 1024,
+      // Thinking off + low effort: fast answers, and the token budget goes
+      // entirely to the visible response.
+      thinking: { type: 'disabled' },
+      output_config: { effort: 'low' },
+      system,
+      messages,
+    },
+    signal,
+  );
+
+  const data = (await response.json()) as {
+    content?: Array<{ type: string; text?: string }>;
+    stop_reason?: string;
+  };
+
+  if (data.stop_reason === 'refusal') {
+    throw new AnthropicError('refusal', 'Claude declined to answer this question.');
+  }
+
+  const text = data.content?.find((b) => b.type === 'text')?.text;
+  if (!text) {
+    throw new AnthropicError('api', 'No response text received from the API.');
+  }
+
+  const cleaned = stripMarkdown(text);
+  if (data.stop_reason === 'max_tokens') {
+    return `${cleaned}\n\n(Answer was cut off — ask a follow-up to continue.)`;
+  }
+  return cleaned;
+}
+
+async function postToApi(
+  apiKey: string,
+  body: object,
+  signal?: AbortSignal,
+): Promise<Response> {
   const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
@@ -84,12 +138,7 @@ async function callApi(
         'content-type': 'application/json',
         'anthropic-dangerous-direct-browser-access': 'true',
       },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 1024,
-        system,
-        messages,
-      }),
+      body: JSON.stringify(body),
       signal: requestSignal,
     });
   } catch (err) {
@@ -115,18 +164,12 @@ async function callApi(
     if (response.status >= 500) {
       throw new AnthropicError('server', 'Service unavailable. Please try again.');
     }
-    const body = await response.text().catch(() => '');
-    throw new AnthropicError('api', `API error (${response.status}): ${body || 'Unknown error'}`);
+    const errorBody = await response.text().catch(() => '');
+    throw new AnthropicError(
+      'api',
+      `API error (${response.status}): ${errorBody || 'Unknown error'}`,
+    );
   }
 
-  const data = (await response.json()) as {
-    content?: Array<{ type: string; text?: string }>;
-  };
-
-  const text = data.content?.find((b) => b.type === 'text')?.text;
-  if (!text) {
-    throw new AnthropicError('api', 'No response text received from the API.');
-  }
-
-  return stripMarkdown(text);
+  return response;
 }

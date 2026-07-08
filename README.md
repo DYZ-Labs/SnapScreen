@@ -68,4 +68,4 @@ Load the `dist/` folder as an unpacked extension. Vite will rebuild on file chan
 
 ## Privacy
 
-Your API key is stored locally in `chrome.storage.local` on your device. Screenshots are sent directly to Anthropic's API and are not stored by the extension.
+Your API key is stored unencrypted in `chrome.storage.local` on your device and is only ever sent directly to Anthropic's API from your browser — it never passes through a third-party server, and the extension's content scripts (the code injected into web pages) never read it. Note that anyone with access to your Chrome profile could extract the key, so consider using a dedicated key with a spend limit. Screenshots are sent directly to Anthropic's API and are not stored by the extension.

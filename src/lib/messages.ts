@@ -23,7 +23,7 @@ export type DisplayMessage = {
 };
 
 export type BgToCsMessage =
-  | { type: 'START_SNIP' }
+  | { type: 'START_SNIP'; hasApiKey: boolean }
   | { type: 'CROPPED_IMAGE'; dataUrl: string }
   | {
       type: 'ANALYZE_RESULT';

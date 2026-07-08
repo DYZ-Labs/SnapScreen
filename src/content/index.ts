@@ -14,6 +14,8 @@ let displayMessages: DisplayMessage[] = [];
 let conversationHistory: AnthropicMessage[] = [];
 let currentDataUrl = '';
 let lastRect: Rect | undefined;
+let lastHint: string | undefined;
+let retryLastRequest: (() => void) | null = null;
 
 function resetSessionState(): void {
   isPanelOpen = false;
@@ -22,6 +24,7 @@ function resetSessionState(): void {
   conversationHistory = [];
   currentDataUrl = '';
   lastRect = undefined;
+  retryLastRequest = null;
 }
 
 function cleanup(): void {
@@ -33,25 +36,70 @@ function isActiveSession(messageScreenshotId: string): boolean {
   return isPanelOpen && screenshotId !== null && messageScreenshotId === screenshotId;
 }
 
-function handleFollowUp(text: string): void {
-  if (!screenshotId) return;
-
-  displayMessages = [...displayMessages, { role: 'user', content: text }];
+function renderPanel(state: { pending: boolean; error?: string; errorCode?: string }): void {
   isPanelOpen = true;
   showResultPanel({
-    dataUrl: currentDataUrl,
+    dataUrl: currentDataUrl || undefined,
     messages: displayMessages,
-    pending: true,
+    error: state.error,
+    errorCode: state.errorCode,
+    pending: state.pending,
     anchorRect: lastRect,
     onClose: cleanup,
     onFollowUp: handleFollowUp,
+    onStop: stopGeneration,
+    onRetry: retryLastRequest ?? undefined,
+    onResnip: handleResnip,
   });
+}
+
+function stopGeneration(): void {
+  chrome.runtime.sendMessage({ type: 'CANCEL_GENERATION' });
+  renderPanel({ pending: false });
+}
+
+function handleResnip(): void {
+  // The panel has already been closed (and cleanup run) by the time this fires.
+  beginSnip(lastHint);
+}
+
+function sendAnalyze(prompt?: string): void {
+  const id = screenshotId;
+  if (!id) return;
+
+  retryLastRequest = () => {
+    renderPanel({ pending: true });
+    sendAnalyze(prompt);
+  };
   chrome.runtime.sendMessage({
-    type: 'FOLLOW_UP',
-    text,
-    history: conversationHistory,
-    screenshotId,
+    type: 'ANALYZE',
+    dataUrl: currentDataUrl,
+    screenshotId: id,
+    prompt,
   });
+}
+
+function handleFollowUp(text: string): void {
+  const id = screenshotId;
+  if (!id) return;
+
+  displayMessages = [...displayMessages, { role: 'user', content: text }];
+  renderPanel({ pending: true });
+
+  // If the first analysis never completed (e.g. it was stopped), there is no
+  // conversation history containing the screenshot yet — analyze it with the
+  // user's question as the prompt instead of sending an imageless follow-up.
+  if (conversationHistory.length === 0) {
+    sendAnalyze(text);
+    return;
+  }
+
+  const history = conversationHistory;
+  retryLastRequest = () => {
+    renderPanel({ pending: true });
+    chrome.runtime.sendMessage({ type: 'FOLLOW_UP', text, history, screenshotId: id });
+  };
+  chrome.runtime.sendMessage({ type: 'FOLLOW_UP', text, history, screenshotId: id });
 }
 
 function beginSnip(hintText?: string): void {
@@ -78,13 +126,10 @@ if (!window.__snapscreenListenerReady) {
   chrome.runtime.onMessage.addListener((message: BgToCsMessage) => {
     switch (message.type) {
       case 'START_SNIP':
-        void chrome.storage.local.get(['apiKey']).then((stored) => {
-          const hasKey = Boolean(stored.apiKey);
-          const hint = hasKey
-            ? 'Drag to select a region · Click to cancel'
-            : 'Drag to select · Set API key in extension settings to analyze · Click to cancel';
-          beginSnip(hint);
-        });
+        lastHint = message.hasApiKey
+          ? 'Drag to select a region · Click to cancel'
+          : 'Drag to select · Set API key in extension settings to analyze · Click to cancel';
+        beginSnip(lastHint);
         break;
 
       case 'CROPPED_IMAGE':
@@ -92,58 +137,26 @@ if (!window.__snapscreenListenerReady) {
         displayMessages = [];
         conversationHistory = [];
         currentDataUrl = message.dataUrl;
-        isPanelOpen = true;
-        showResultPanel({
-          dataUrl: message.dataUrl,
-          messages: [],
-          pending: true,
-          anchorRect: lastRect,
-          onClose: cleanup,
-          onFollowUp: handleFollowUp,
-        });
-        chrome.runtime.sendMessage({
-          type: 'ANALYZE',
-          dataUrl: message.dataUrl,
-          screenshotId,
-        });
+        renderPanel({ pending: true });
+        sendAnalyze();
         break;
 
       case 'ANALYZE_RESULT': {
         if (!isActiveSession(message.screenshotId)) return;
 
         conversationHistory = message.history ?? conversationHistory;
-        const isFirstExchange = displayMessages.length === 0;
-        if (isFirstExchange && message.prompt) {
+        if (displayMessages.length === 0 && message.prompt) {
           displayMessages = [...displayMessages, { role: 'user', content: message.prompt }];
         }
         displayMessages = [...displayMessages, { role: 'assistant', content: message.text }];
-        showResultPanel({
-          dataUrl: currentDataUrl,
-          messages: displayMessages,
-          pending: false,
-          anchorRect: lastRect,
-          onClose: cleanup,
-          onFollowUp: handleFollowUp,
-        });
+        renderPanel({ pending: false });
         break;
       }
 
-      case 'ANALYZE_ERROR': {
+      case 'ANALYZE_ERROR':
         if (!isActiveSession(message.screenshotId)) return;
-
-        const hasThread = displayMessages.length > 0;
-        showResultPanel({
-          dataUrl: currentDataUrl || undefined,
-          messages: hasThread ? displayMessages : undefined,
-          error: message.message,
-          errorCode: message.code,
-          pending: false,
-          anchorRect: lastRect,
-          onClose: cleanup,
-          onFollowUp: handleFollowUp,
-        });
+        renderPanel({ pending: false, error: message.message, errorCode: message.code });
         break;
-      }
 
       case 'SHOW_ERROR':
         showErrorToast(message.message);
