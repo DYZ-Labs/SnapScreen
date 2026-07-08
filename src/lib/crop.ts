@@ -10,10 +10,10 @@ export async function cropImage(
   const bitmap = await createImageBitmap(blob);
 
   const scale = devicePixelRatio;
-  const sx = Math.round(rect.x * scale);
-  const sy = Math.round(rect.y * scale);
-  const sw = Math.round(rect.width * scale);
-  const sh = Math.round(rect.height * scale);
+  const sx = Math.min(Math.max(0, Math.round(rect.x * scale)), bitmap.width - 1);
+  const sy = Math.min(Math.max(0, Math.round(rect.y * scale)), bitmap.height - 1);
+  const sw = Math.max(1, Math.min(Math.round(rect.width * scale), bitmap.width - sx));
+  const sh = Math.max(1, Math.min(Math.round(rect.height * scale), bitmap.height - sy));
 
   const canvas = new OffscreenCanvas(sw, sh);
   const ctx = canvas.getContext('2d');

@@ -221,7 +221,7 @@ export function showResultPanel(options: ResultPanelOptions): void {
 
   setupDrag(titleWrap, root);
   positionPanel(root, options.anchorRect);
-  setupPanelPositioningListeners(root, panelImage);
+  setupPanelPositioningListeners(root, panelImage, options.onClose);
 
   backdrop.onclick = () => closePanel(root, options.onClose);
 }
@@ -441,6 +441,7 @@ function getPreferredPanelPosition(anchorRect?: Rect): { top: number; left: numb
 function setupPanelPositioningListeners(
   panel: HTMLElement,
   panelImage: HTMLImageElement | null,
+  onClose: () => void,
 ): void {
   panelPositioningAbort?.abort();
   const abort = new AbortController();
@@ -450,6 +451,17 @@ function setupPanelPositioningListeners(
   const reclamp = () => ensurePanelInViewport(panel);
 
   window.addEventListener('resize', reclamp, { signal });
+
+  window.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.key !== 'Escape') return;
+      // The lightbox handles its own Escape; only close the panel when no lightbox is open.
+      if (document.getElementById(LIGHTBOX_ID)) return;
+      closePanel(panel, onClose);
+    },
+    { signal, capture: true },
+  );
 
   const resizeObserver = new ResizeObserver(reclamp);
   resizeObserver.observe(panel);
@@ -478,8 +490,8 @@ function setupDrag(dragHandle: HTMLElement, panel: HTMLElement): void {
     const root = document.documentElement;
 
     root.classList.add('snapscreen-panel-dragging');
-    document.body.style.cursor = 'default';
-    root.style.cursor = 'default';
+    document.body.style.cursor = 'grabbing';
+    root.style.cursor = 'grabbing';
 
     function onMove(ev: PointerEvent): void {
       applyPanelPosition(panel, ev.clientY - offsetY, ev.clientX - offsetX);

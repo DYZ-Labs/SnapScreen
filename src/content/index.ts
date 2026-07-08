@@ -15,9 +15,8 @@ let conversationHistory: AnthropicMessage[] = [];
 let currentDataUrl = '';
 let lastRect: Rect | undefined;
 
-function cleanup(): void {
+function resetSessionState(): void {
   isPanelOpen = false;
-  chrome.runtime.sendMessage({ type: 'CANCEL_GENERATION' });
   screenshotId = null;
   displayMessages = [];
   conversationHistory = [];
@@ -25,12 +24,9 @@ function cleanup(): void {
   lastRect = undefined;
 }
 
-function resetSessionState(): void {
-  isPanelOpen = false;
-  screenshotId = null;
-  displayMessages = [];
-  conversationHistory = [];
-  currentDataUrl = '';
+function cleanup(): void {
+  chrome.runtime.sendMessage({ type: 'CANCEL_GENERATION' });
+  resetSessionState();
 }
 
 function isActiveSession(messageScreenshotId: string): boolean {
@@ -60,7 +56,6 @@ function handleFollowUp(text: string): void {
 
 function beginSnip(hintText?: string): void {
   resetSessionState();
-  lastRect = undefined;
   startSnipOverlay({
     hintText,
     onRegionSelected(rect) {
@@ -80,7 +75,7 @@ function beginSnip(hintText?: string): void {
 if (!window.__snapscreenListenerReady) {
   window.__snapscreenListenerReady = true;
 
-  chrome.runtime.onMessage.addListener((message: BgToCsMessage & { history?: AnthropicMessage[] }) => {
+  chrome.runtime.onMessage.addListener((message: BgToCsMessage) => {
     switch (message.type) {
       case 'START_SNIP':
         void chrome.storage.local.get(['apiKey']).then((stored) => {
@@ -113,10 +108,14 @@ if (!window.__snapscreenListenerReady) {
         });
         break;
 
-      case 'ANALYZE_RESULT':
+      case 'ANALYZE_RESULT': {
         if (!isActiveSession(message.screenshotId)) return;
 
         conversationHistory = message.history ?? conversationHistory;
+        const isFirstExchange = displayMessages.length === 0;
+        if (isFirstExchange && message.prompt) {
+          displayMessages = [...displayMessages, { role: 'user', content: message.prompt }];
+        }
         displayMessages = [...displayMessages, { role: 'assistant', content: message.text }];
         showResultPanel({
           dataUrl: currentDataUrl,
@@ -127,6 +126,7 @@ if (!window.__snapscreenListenerReady) {
           onFollowUp: handleFollowUp,
         });
         break;
+      }
 
       case 'ANALYZE_ERROR': {
         if (!isActiveSession(message.screenshotId)) return;

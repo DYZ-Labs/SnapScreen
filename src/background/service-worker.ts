@@ -139,6 +139,8 @@ chrome.commands.onCommand.addListener((command, tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return;
+
   const tabId = sender.tab?.id;
 
   void (async () => {
@@ -188,7 +190,6 @@ chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendRespon
               settings.apiKey,
               message.dataUrl,
               prompt,
-              message.history,
               controller.signal,
             );
 
@@ -201,9 +202,10 @@ chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendRespon
               type: 'ANALYZE_RESULT',
               text: result.text,
               history: result.history,
+              prompt,
               screenshotId,
             });
-            sendResponse({ ok: true, ...result });
+            sendResponse({ ok: true });
           } finally {
             finishGeneration(tabId, controller);
           }
@@ -250,7 +252,7 @@ chrome.runtime.onMessage.addListener((message: CsToBgMessage, sender, sendRespon
               history: result.history,
               screenshotId,
             });
-            sendResponse({ ok: true, ...result });
+            sendResponse({ ok: true });
           } finally {
             finishGeneration(tabId, controller);
           }

@@ -81,18 +81,12 @@
   padding: 0 8px 0 14px;
   background: var(--snapscreen-panel-bg);
   border-bottom: 1px solid rgba(108, 92, 231, 0.15);
-  cursor: default !important;
   user-select: none;
-}
-
-.snapscreen-panel-header:hover,
-.snapscreen-panel-header:active {
-  cursor: default !important;
 }
 
 html.snapscreen-panel-dragging,
 html.snapscreen-panel-dragging * {
-  cursor: default !important;
+  cursor: grabbing !important;
 }
 
 .snapscreen-panel-title-wrap {
@@ -101,7 +95,7 @@ html.snapscreen-panel-dragging * {
   gap: 8px;
   min-width: 0;
   flex: 1;
-  cursor: default !important;
+  cursor: grab;
   touch-action: none;
   user-select: none;
 }
@@ -132,14 +126,9 @@ html.snapscreen-panel-dragging * {
   border-radius: 8px;
   background: transparent;
   color: #9ca3af;
-  cursor: default !important;
+  cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s, color 0.15s;
-}
-
-.snapscreen-close-btn:hover,
-.snapscreen-close-btn:active {
-  cursor: default !important;
 }
 
 .snapscreen-close-btn:hover {
@@ -156,15 +145,9 @@ html.snapscreen-panel-dragging * {
   border: none;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: #2a2a2a;
-  cursor: default !important;
+  cursor: zoom-in;
   flex-shrink: 0;
   transition: opacity 0.15s;
-}
-
-.snapscreen-panel-image-btn:hover,
-.snapscreen-panel-image-btn:focus-visible,
-.snapscreen-panel-image-btn:active {
-  cursor: default !important;
 }
 
 .snapscreen-panel-image-btn:hover .snapscreen-panel-image,
@@ -242,18 +225,13 @@ html.snapscreen-panel-dragging * {
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.55);
   color: #ececec;
-  cursor: default !important;
+  cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .snapscreen-lightbox-close:hover {
   background: rgba(0, 0, 0, 0.75);
   color: #fff;
-  cursor: default !important;
-}
-
-.snapscreen-lightbox-close:active {
-  cursor: default !important;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -463,12 +441,11 @@ html.snapscreen-panel-dragging * {
 .snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active {
   background: var(--snapscreen-accent);
   color: var(--snapscreen-text-on-accent);
-  cursor: default;
+  cursor: pointer;
 }
 
 .snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:hover {
   background: var(--snapscreen-accent-hover);
-  cursor: default;
 }
 
 .snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:hover,

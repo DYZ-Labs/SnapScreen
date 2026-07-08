@@ -5,6 +5,7 @@ import { FOLLOW_UP_SYSTEM_PROMPT, SCREENSHOT_QA_SYSTEM_PROMPT } from './screensh
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-5';
+const REQUEST_TIMEOUT_MS = 60_000;
 
 export class AnthropicError extends Error {
   constructor(
@@ -20,7 +21,6 @@ export async function analyzeImage(
   apiKey: string,
   dataUrl: string,
   prompt: string,
-  history?: AnthropicMessage[],
   signal?: AbortSignal,
 ): Promise<{ text: string; history: AnthropicMessage[] }> {
   const base64 = dataUrlToBase64(dataUrl);
@@ -37,24 +37,13 @@ export async function analyzeImage(
     { type: 'text' as const, text: prompt },
   ];
 
-  const messages: AnthropicMessage[] = history?.length
-    ? [...history]
-    : [{ role: 'user', content: userContent }];
-
-  if (history?.length) {
-    messages.push({ role: 'user', content: prompt });
-  }
-
+  const messages: AnthropicMessage[] = [{ role: 'user', content: userContent }];
   const text = await callApi(apiKey, messages, SCREENSHOT_QA_SYSTEM_PROMPT, signal);
 
-  const updatedHistory: AnthropicMessage[] = history?.length
-    ? [...history, { role: 'user', content: prompt }, { role: 'assistant', content: text }]
-    : [
-        { role: 'user', content: userContent },
-        { role: 'assistant', content: text },
-      ];
-
-  return { text, history: updatedHistory };
+  return {
+    text,
+    history: [...messages, { role: 'assistant', content: text }],
+  };
 }
 
 export async function followUp(
@@ -82,6 +71,9 @@ async function callApi(
   system: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
   let response: Response;
   try {
     response = await fetch(API_URL, {
@@ -98,10 +90,13 @@ async function callApi(
         system,
         messages,
       }),
-      signal,
+      signal: requestSignal,
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new AnthropicError('timeout', 'Request timed out. Please try again.');
+    }
     throw new AnthropicError('network', 'Network error. Check your connection and try again.');
   }
 
@@ -110,7 +105,12 @@ async function callApi(
       throw new AnthropicError('auth', 'Invalid API key. Check your settings.');
     }
     if (response.status === 429) {
-      throw new AnthropicError('rate_limit', 'Rate limit reached. Please try again shortly.');
+      const retryAfter = response.headers.get('retry-after');
+      const hint =
+        retryAfter && /^\d+$/.test(retryAfter)
+          ? `Try again in ~${retryAfter}s.`
+          : 'Please try again shortly.';
+      throw new AnthropicError('rate_limit', `Rate limit reached. ${hint}`);
     }
     if (response.status >= 500) {
       throw new AnthropicError('server', 'Service unavailable. Please try again.');

@@ -25,13 +25,19 @@ export type DisplayMessage = {
 export type BgToCsMessage =
   | { type: 'START_SNIP' }
   | { type: 'CROPPED_IMAGE'; dataUrl: string }
-  | { type: 'ANALYZE_RESULT'; text: string; screenshotId: string; history?: AnthropicMessage[] }
+  | {
+      type: 'ANALYZE_RESULT';
+      text: string;
+      screenshotId: string;
+      history?: AnthropicMessage[];
+      prompt?: string;
+    }
   | { type: 'ANALYZE_ERROR'; code: string; message: string; screenshotId: string }
   | { type: 'SHOW_ERROR'; message: string };
 
 export type CsToBgMessage =
   | { type: 'CAPTURE_REGION'; rect: Rect; devicePixelRatio: number }
-  | { type: 'ANALYZE'; dataUrl: string; screenshotId: string; prompt?: string; history?: AnthropicMessage[] }
+  | { type: 'ANALYZE'; dataUrl: string; screenshotId: string; prompt?: string }
   | { type: 'FOLLOW_UP'; text: string; history: AnthropicMessage[]; screenshotId: string }
   | { type: 'CANCEL_GENERATION' }
   | { type: 'SNIP_CANCELLED' };
