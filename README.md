@@ -95,3 +95,4 @@ The isolated content script keeps capture and conversation state. It creates a f
 
 This boundary protects confidentiality and prevents page capture listeners from cancelling the frame's keyboard/input handling, but it is not a tamper-proof browser surface. Chrome exposes coarse pointer activity retargeted to the outer host (not the internal target or text); tests confirm that parent `preventDefault()` and `stopImmediatePropagation()` do not block the child click. A hostile page can still remove, move, cover, or navigate the outer host and cause denial of service or attempt clickjacking. The packaged frame is web-accessible, but a page-created copy remains inert because it cannot register or claim a legitimate session capability. A page can still imitate the extension visually with its own HTML, so treat unexpected or context-sensitive prompts as untrusted, just as with any UI rendered inside a web page.
 # SnapScreen
+# SnapScreen
