@@ -5,25 +5,63 @@ export async function cropImage(
   rect: Rect,
   devicePixelRatio: number,
 ): Promise<string> {
+  validateCropRequest(rect, devicePixelRatio);
+
   const response = await fetch(dataUrl);
   const blob = await response.blob();
   const bitmap = await createImageBitmap(blob);
 
-  const scale = devicePixelRatio;
-  const sx = Math.min(Math.max(0, Math.round(rect.x * scale)), bitmap.width - 1);
-  const sy = Math.min(Math.max(0, Math.round(rect.y * scale)), bitmap.height - 1);
-  const sw = Math.max(1, Math.min(Math.round(rect.width * scale), bitmap.width - sx));
-  const sh = Math.max(1, Math.min(Math.round(rect.height * scale), bitmap.height - sy));
+  try {
+    const requestedLeft = Math.round(rect.x * devicePixelRatio);
+    const requestedTop = Math.round(rect.y * devicePixelRatio);
+    const requestedRight = Math.round((rect.x + rect.width) * devicePixelRatio);
+    const requestedBottom = Math.round((rect.y + rect.height) * devicePixelRatio);
+    if (
+      ![requestedLeft, requestedTop, requestedRight, requestedBottom].every(Number.isFinite)
+    ) {
+      throw new RangeError('Crop rectangle is outside the supported coordinate range.');
+    }
 
-  const canvas = new OffscreenCanvas(sw, sh);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Failed to get canvas context');
+    const sx = clamp(requestedLeft, 0, bitmap.width);
+    const sy = clamp(requestedTop, 0, bitmap.height);
+    const right = clamp(requestedRight, 0, bitmap.width);
+    const bottom = clamp(requestedBottom, 0, bitmap.height);
+    const sw = right - sx;
+    const sh = bottom - sy;
+    if (sw <= 0 || sh <= 0) {
+      throw new RangeError('Crop rectangle does not intersect the captured image.');
+    }
 
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
-  bitmap.close();
+    const canvas = new OffscreenCanvas(sw, sh);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to get canvas context');
 
-  const cropped = await canvas.convertToBlob({ type: 'image/png' });
-  return blobToDataUrl(cropped);
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    const cropped = await canvas.convertToBlob({ type: 'image/png' });
+    return await blobToDataUrl(cropped);
+  } finally {
+    bitmap.close();
+  }
+}
+
+function validateCropRequest(rect: Rect, devicePixelRatio: number): void {
+  if (
+    !Number.isFinite(rect.x) ||
+    !Number.isFinite(rect.y) ||
+    !Number.isFinite(rect.width) ||
+    !Number.isFinite(rect.height) ||
+    !Number.isFinite(devicePixelRatio) ||
+    rect.width <= 0 ||
+    rect.height <= 0 ||
+    devicePixelRatio <= 0
+  ) {
+    throw new RangeError('Crop rectangle and device pixel ratio must be finite and positive.');
+  }
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), maximum);
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {

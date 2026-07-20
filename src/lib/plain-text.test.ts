@@ -1,37 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { stripMarkdown } from './plain-text';
+import { normalizePlainText, stripMarkdown } from './plain-text';
 
-describe('stripMarkdown', () => {
-  it('strips heading markers', () => {
-    expect(stripMarkdown('## Answer')).toBe('Answer');
+describe('normalizePlainText', () => {
+  it('preserves Markdown-looking characters that may be meaningful syntax', () => {
+    const answer = [
+      '## C_preprocessor',
+      '- `user_id` = value_1',
+      '1. **Do not** remove * or #',
+      '```ts',
+      'const snake_case = items.map((x) => x * 2);',
+      '```',
+    ].join('\n');
+
+    expect(normalizePlainText(answer)).toBe(answer);
   });
 
-  it('strips bullet list markers', () => {
-    expect(stripMarkdown('- first\n* second\n+ third')).toBe('first\nsecond\nthird');
+  it('normalizes CRLF and CR line endings', () => {
+    expect(normalizePlainText('first\r\nsecond\rthird')).toBe('first\nsecond\nthird');
   });
 
-  it('strips ordered list markers', () => {
-    expect(stripMarkdown('1. first\n2. second')).toBe('first\nsecond');
+  it('preserves runs of blank lines', () => {
+    expect(normalizePlainText('a\n\n\n\nb')).toBe('a\n\n\n\nb');
   });
 
-  it('unwraps bold and underscore emphasis', () => {
-    expect(stripMarkdown('**bold** and __also bold__')).toBe('bold and also bold');
-  });
-
-  it('unwraps inline code and removes stray backticks', () => {
-    expect(stripMarkdown('use `map()` here')).toBe('use map() here');
-    expect(stripMarkdown('```\ncode line\n```')).toBe('code line');
-  });
-
-  it('collapses runs of blank lines to a single blank line', () => {
-    expect(stripMarkdown('a\n\n\n\nb')).toBe('a\n\nb');
-  });
-
-  it('trims surrounding whitespace', () => {
-    expect(stripMarkdown('  answer  \n')).toBe('answer');
+  it('preserves surrounding whitespace used by code or preformatted data', () => {
+    expect(normalizePlainText('  answer  \n')).toBe('  answer  \n');
   });
 
   it('leaves plain text untouched', () => {
-    expect(stripMarkdown('2 + 2 = 4')).toBe('2 + 2 = 4');
+    expect(normalizePlainText('2 + 2 = 4')).toBe('2 + 2 = 4');
+  });
+
+  it('retains the old export as a compatibility alias', () => {
+    expect(stripMarkdown('`code_value`')).toBe('`code_value`');
   });
 });

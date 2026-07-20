@@ -1,3 +1,5 @@
+import type { SnapScreenLimits, SnapScreenSessionSettings } from './storage';
+
 export interface Rect {
   x: number;
   y: number;
@@ -20,27 +22,65 @@ export type AnthropicMessage = {
 export type DisplayMessage = {
   role: 'user' | 'assistant';
   content: string;
+  status?: 'failed';
 };
 
 export type BgToCsMessage =
-  | { type: 'START_SNIP'; hasApiKey: boolean }
-  | { type: 'CROPPED_IMAGE'; dataUrl: string }
-  | { type: 'ANALYZE_CHUNK'; text: string; screenshotId: string }
+  | {
+      type: 'START_SNIP';
+      hasApiKey: boolean;
+      defaultPrompt: string;
+      limits: SnapScreenLimits;
+    }
+  | { type: 'CROPPED_IMAGE'; dataUrl: string; captureId: string }
+  | { type: 'CAPTURE_ERROR'; code: string; message: string; captureId: string }
+  | {
+      type: 'ANALYZE_CHUNK';
+      text: string;
+      captureId: string;
+      requestId: string;
+      screenshotId: string;
+    }
   | {
       type: 'ANALYZE_RESULT';
       text: string;
+      captureId: string;
+      requestId: string;
       screenshotId: string;
       history?: AnthropicMessage[];
-      prompt?: string;
     }
-  | { type: 'ANALYZE_ERROR'; code: string; message: string; screenshotId: string }
+  | {
+      type: 'ANALYZE_ERROR';
+      code: string;
+      message: string;
+      captureId: string;
+      requestId: string;
+      screenshotId: string;
+    }
   | { type: 'SHOW_ERROR'; message: string };
 
 export type CsToBgMessage =
-  | { type: 'CAPTURE_REGION'; rect: Rect; devicePixelRatio: number }
-  | { type: 'ANALYZE'; dataUrl: string; screenshotId: string; prompt?: string }
-  | { type: 'FOLLOW_UP'; text: string; history: AnthropicMessage[]; screenshotId: string }
-  | { type: 'CANCEL_GENERATION' }
-  | { type: 'SNIP_CANCELLED' };
+  | { type: 'CAPTURE_REGION'; rect: Rect; devicePixelRatio: number; captureId: string }
+  | {
+      type: 'ANALYZE';
+      dataUrl: string;
+      captureId: string;
+      requestId: string;
+      screenshotId: string;
+      sessionSettings: SnapScreenSessionSettings;
+      question?: string;
+    }
+  | {
+      type: 'FOLLOW_UP';
+      text: string;
+      history: AnthropicMessage[];
+      captureId: string;
+      requestId: string;
+      screenshotId: string;
+      sessionSettings: SnapScreenSessionSettings;
+    }
+  | { type: 'CANCEL_GENERATION'; captureId: string; requestId: string }
+  | { type: 'SNIP_CANCELLED'; captureId: string }
+  | { type: 'UI_UNAVAILABLE' };
 
 export type RuntimeMessage = BgToCsMessage | CsToBgMessage;

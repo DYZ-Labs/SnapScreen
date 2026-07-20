@@ -1,8 +1,35 @@
+:host {
+  all: initial;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.snapscreen-overlay,
+.snapscreen-panel-backdrop,
+.snapscreen-panel,
+.snapscreen-lightbox,
+.snapscreen-toast {
+  pointer-events: auto;
+}
+
 .snapscreen-overlay {
   position: fixed;
   inset: 0;
   z-index: 2147483646;
   cursor: crosshair;
+  outline: none;
+}
+
+.snapscreen-overlay:focus-visible .snapscreen-hint {
+  box-shadow: 0 0 0 3px rgba(147, 197, 253, 0.55);
 }
 
 .snapscreen-dim {
@@ -17,6 +44,14 @@
   background: rgba(59, 130, 246, 0.12);
   pointer-events: none;
   z-index: 1;
+}
+
+.snapscreen-selection-keyboard {
+  border-color: #a78bfa;
+  background: rgba(139, 92, 246, 0.16);
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.9),
+    0 0 0 5px rgba(139, 92, 246, 0.75);
 }
 
 .snapscreen-size-badge {
@@ -43,6 +78,22 @@
   font: 13px/1.4 system-ui, -apple-system, sans-serif;
   pointer-events: none;
   z-index: 2;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  text-align: center;
+  white-space: normal;
+}
+
+.snapscreen-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ── Panel shell ── */
@@ -134,8 +185,8 @@
   user-select: none;
 }
 
-html.snapscreen-panel-dragging,
-html.snapscreen-panel-dragging * {
+.snapscreen-panel-dragging,
+.snapscreen-panel-dragging * {
   cursor: grabbing !important;
 }
 
@@ -360,11 +411,50 @@ html.snapscreen-panel-dragging * {
   color: var(--snapscreen-text-primary);
 }
 
+.snapscreen-msg-assistant.snapscreen-msg-failed {
+  width: 100%;
+  max-width: 100%;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--snapscreen-error) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--snapscreen-error) 9%, transparent);
+  color: var(--snapscreen-error);
+}
+
 .snapscreen-msg-assistant-wrap {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+}
+
+.snapscreen-failed-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.snapscreen-failed-action {
+  padding: 5px 9px;
+  border: 1px solid var(--snapscreen-composer-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--snapscreen-text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.snapscreen-failed-action:hover,
+.snapscreen-failed-action:focus-visible {
+  border-color: var(--snapscreen-accent);
+  background: var(--snapscreen-hover-bg);
+  outline: none;
+}
+
+.snapscreen-failed-action-remove {
+  color: var(--snapscreen-error);
 }
 
 .snapscreen-copy-btn {
@@ -396,25 +486,7 @@ html.snapscreen-panel-dragging * {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 10px;
   margin-top: 4px;
-}
-
-.snapscreen-stop-btn {
-  padding: 4px 12px;
-  border: 1px solid var(--snapscreen-composer-border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--snapscreen-text-primary);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.snapscreen-stop-btn:hover {
-  background: var(--snapscreen-hover-bg);
-  border-color: var(--snapscreen-text-secondary);
 }
 
 .snapscreen-error {
@@ -447,6 +519,13 @@ html.snapscreen-panel-dragging * {
   padding: 10px 12px 12px;
   border-top: 1px solid var(--snapscreen-border-subtle);
   background-color: var(--snapscreen-panel-bg);
+}
+
+.snapscreen-input-error {
+  margin: 7px 4px 0;
+  color: var(--snapscreen-error);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .snapscreen-panel .snapscreen-composer {
@@ -551,12 +630,24 @@ html.snapscreen-panel-dragging * {
   cursor: pointer;
 }
 
+.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-stop {
+  background: var(--snapscreen-accent);
+  color: var(--snapscreen-text-on-accent);
+  cursor: pointer;
+}
+
 .snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:hover {
   background: var(--snapscreen-accent-hover);
 }
 
+.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-stop:hover {
+  background: var(--snapscreen-accent-hover);
+}
+
 .snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:hover,
-.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:focus-visible {
+.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-active:focus-visible,
+.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-stop:hover,
+.snapscreen-panel .snapscreen-send-btn.snapscreen-send-btn-stop:focus-visible {
   box-shadow: 0 0 12px var(--snapscreen-accent-glow);
 }
 

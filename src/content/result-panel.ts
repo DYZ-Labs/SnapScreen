@@ -1,4 +1,11 @@
 import { clampToViewport, VIEWPORT_MARGIN } from '../lib/clamp-to-viewport';
+import { countTextCharacters } from '../lib/request-limits';
+import { getComposerButtonState } from './composer-button-state';
+import {
+  getUiRoot,
+  queryUiElement,
+  removeUiHostIfEmpty,
+} from './ui-root';
 import type { DisplayMessage, Rect } from '../lib/messages';
 
 const PANEL_ID = 'snapscreen-panel-root';
@@ -11,11 +18,33 @@ const CLOSE_ICON_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hid
 const RESNIP_ICON_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>`;
 const COPY_ICON_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const CHECK_ICON_SVG = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`;
+const SEND_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
+const STOP_ICON_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor"><circle cx="12" cy="12" r="9" opacity="0.22"/><rect x="8" y="8" width="8" height="8" rx="1.5"/></svg>`;
 
 let panelPosition: { top: number; left: number } | null = null;
 let panelPositioningAbort: AbortController | null = null;
+let panelDragAbort: AbortController | null = null;
 let lightboxAbort: AbortController | null = null;
 let lightboxReturnFocus: HTMLElement | null = null;
+let toastTimeout: ReturnType<typeof setTimeout> | null = null;
+let draggingPanel: HTMLElement | null = null;
+let lightboxBackgroundPanel: HTMLElement | null = null;
+let lightboxBackgroundAriaHidden: string | null = null;
+const panelAnimationFrames = new Set<number>();
+
+function schedulePanelFrame(callback: FrameRequestCallback): number {
+  const frame = requestAnimationFrame((time) => {
+    panelAnimationFrames.delete(frame);
+    callback(time);
+  });
+  panelAnimationFrames.add(frame);
+  return frame;
+}
+
+function cancelPanelFrames(): void {
+  for (const frame of panelAnimationFrames) cancelAnimationFrame(frame);
+  panelAnimationFrames.clear();
+}
 
 export interface ResultPanelOptions {
   dataUrl?: string;
@@ -26,29 +55,39 @@ export interface ResultPanelOptions {
   anchorRect?: Rect;
   onClose: () => void;
   onFollowUp: (text: string) => void;
+  onOpenSettings?: () => void;
   onStop?: () => void;
   onRetry?: () => void;
   onResnip?: () => void;
+  maxInputCharacters?: number;
+  failedFollowUpActions?: {
+    onRetry: () => void;
+    onRemove: () => void;
+  };
 }
 
 export function showResultPanel(options: ResultPanelOptions): void {
-  document.getElementById('snapscreen-overlay-root')?.remove();
+  cancelPanelFrames();
+  queryUiElement('#snapscreen-overlay-root')?.remove();
   closeScreenshotLightbox();
+  const uiRoot = getUiRoot();
+  panelDragAbort?.abort();
+  panelDragAbort = null;
+  resetPanelCursor();
 
-  let backdrop = document.getElementById(BACKDROP_ID) as HTMLDivElement | null;
+  let backdrop = queryUiElement<HTMLDivElement>(`#${BACKDROP_ID}`);
   if (!backdrop) {
     backdrop = document.createElement('div');
     backdrop.id = BACKDROP_ID;
     backdrop.className = 'snapscreen-panel-backdrop';
-    document.documentElement.append(backdrop);
+    uiRoot.append(backdrop);
   }
 
-  let root = document.getElementById(PANEL_ID) as HTMLDivElement | null;
-  const isNewPanel = !root;
+  let root = queryUiElement<HTMLDivElement>(`#${PANEL_ID}`);
   if (!root) {
     root = document.createElement('div');
     root.id = PANEL_ID;
-    document.documentElement.append(root);
+    uiRoot.append(root);
   } else if (root.getBoundingClientRect().width > 0) {
     const rect = root.getBoundingClientRect();
     panelPosition = { top: rect.top, left: rect.left };
@@ -96,7 +135,7 @@ export function showResultPanel(options: ResultPanelOptions): void {
     });
     resnipBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      closePanel(root!, options.onClose);
+      disposeResultPanel();
       onResnip();
     });
     headerActions.append(resnipBtn);
@@ -113,7 +152,7 @@ export function showResultPanel(options: ResultPanelOptions): void {
   });
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    closePanel(root!, options.onClose);
+    closePanel(options.onClose);
   });
   headerActions.append(closeBtn);
 
@@ -147,41 +186,74 @@ export function showResultPanel(options: ResultPanelOptions): void {
   const messages = options.messages ?? [];
   const hasMessages = messages.length > 0;
   const isFatalError = !!options.error && !hasMessages;
+  let latestFailedMessageIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant' && messages[index].status === 'failed') {
+      latestFailedMessageIndex = index;
+      break;
+    }
+  }
+  let fatalFocusTarget: HTMLElement | null = null;
 
   if (isFatalError) {
-    appendError(body, options.error!, options.errorCode, options.onRetry);
+    fatalFocusTarget = appendError(
+      body,
+      options.error!,
+      options.errorCode,
+      options.onRetry,
+      options.onOpenSettings,
+    );
   } else {
     if (hasMessages) {
       const thread = document.createElement('div');
       thread.className = 'snapscreen-chat-thread';
 
-      for (const msg of messages) {
+      messages.forEach((msg, index) => {
         const bubble = document.createElement('div');
         bubble.className = `snapscreen-msg snapscreen-msg-${msg.role}`;
+        bubble.classList.toggle('snapscreen-msg-failed', msg.status === 'failed');
         bubble.textContent = msg.content;
+        if (msg.status === 'failed') {
+          bubble.setAttribute('aria-label', `Failed response: ${msg.content}`);
+          if (index === latestFailedMessageIndex) {
+            bubble.setAttribute('role', 'alert');
+          }
+        }
 
         if (msg.role === 'assistant') {
           const wrap = document.createElement('div');
           wrap.className = 'snapscreen-msg-assistant-wrap';
           wrap.append(bubble, createCopyButton(msg.content));
+          if (
+            index === latestFailedMessageIndex
+            && options.failedFollowUpActions
+          ) {
+            wrap.append(createFailedFollowUpActions(options.failedFollowUpActions));
+          }
           thread.append(wrap);
         } else {
           thread.append(bubble);
         }
-      }
+      });
 
       body.append(thread);
     }
 
     if (options.pending) {
-      body.append(createPendingIndicator(options.onStop));
+      body.append(createPendingIndicator());
     }
 
     if (options.error && hasMessages) {
-      appendError(body, options.error, options.errorCode, options.onRetry);
+      appendError(
+        body,
+        options.error,
+        options.errorCode,
+        options.onRetry,
+        options.onOpenSettings,
+      );
     }
 
-    requestAnimationFrame(() => {
+    schedulePanelFrame(() => {
       body.scrollTop = body.scrollHeight;
     });
   }
@@ -222,19 +294,55 @@ export function showResultPanel(options: ResultPanelOptions): void {
   const sendBtn = document.createElement('button');
   sendBtn.type = 'button';
   sendBtn.className = 'snapscreen-send-btn';
-  sendBtn.setAttribute('aria-label', 'Send');
-  sendBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>`;
-  sendBtn.disabled = !!options.pending || isFatalError;
+
+  const inputError = document.createElement('div');
+  inputError.id = 'snapscreen-input-error';
+  inputError.className = 'snapscreen-input-error';
+  inputError.setAttribute('role', 'alert');
+  inputError.hidden = true;
+
+  function clearInputError(): void {
+    inputError.hidden = true;
+    inputError.textContent = '';
+    textarea.removeAttribute('aria-invalid');
+    textarea.removeAttribute('aria-describedby');
+  }
 
   function updateSendState(): void {
-    const canSend = !textarea.disabled && textarea.value.trim().length > 0;
-    sendBtn.disabled = !canSend;
-    sendBtn.classList.toggle('snapscreen-send-btn-active', canSend);
+    const state = getComposerButtonState({
+      pending: !!options.pending,
+      hasText: textarea.value.trim().length > 0,
+      isFatalError,
+      canStop: typeof options.onStop === 'function',
+    });
+
+    sendBtn.innerHTML = state.mode === 'stop' ? STOP_ICON_SVG : SEND_ICON_SVG;
+    sendBtn.setAttribute('aria-label', state.ariaLabel);
+    sendBtn.disabled = state.disabled;
+    sendBtn.classList.toggle('snapscreen-send-btn-active', state.active);
+    sendBtn.classList.toggle('snapscreen-send-btn-stop', state.mode === 'stop');
   }
 
   function submitFollowUp(): void {
     const text = textarea.value.trim();
     if (!text || options.pending) return;
+
+    if (options.maxInputCharacters !== undefined) {
+      const characterCount = countTextCharacters(text);
+      if (characterCount > options.maxInputCharacters) {
+        inputError.textContent =
+          `Question is ${characterCount.toLocaleString()} characters. `
+          + `The current limit is ${options.maxInputCharacters.toLocaleString()}. `
+          + 'Shorten it or raise the limit in Settings.';
+        inputError.hidden = false;
+        textarea.setAttribute('aria-invalid', 'true');
+        textarea.setAttribute('aria-describedby', inputError.id);
+        textarea.focus({ preventScroll: true });
+        return;
+      }
+    }
+
+    clearInputError();
     textarea.value = '';
     textarea.style.height = 'auto';
     adjustTextareaHeight();
@@ -242,7 +350,14 @@ export function showResultPanel(options: ResultPanelOptions): void {
     options.onFollowUp(text);
   }
 
-  sendBtn.addEventListener('click', submitFollowUp);
+  sendBtn.addEventListener('click', () => {
+    if (options.pending) {
+      options.onStop?.();
+      return;
+    }
+
+    submitFollowUp();
+  });
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -250,46 +365,41 @@ export function showResultPanel(options: ResultPanelOptions): void {
     }
   });
   textarea.addEventListener('input', () => {
+    clearInputError();
     updateSendState();
     adjustTextareaHeight();
   });
 
   composer.append(textarea, sendBtn);
-  footer.append(composer);
+  footer.append(composer, inputError);
   root.append(footer);
 
   updateSendState();
   adjustTextareaHeight();
-  requestAnimationFrame(adjustTextareaHeight);
+  schedulePanelFrame(adjustTextareaHeight);
 
   setupDrag(titleWrap, root);
   positionPanel(root, options.anchorRect);
   setupPanelPositioningListeners(root, panelImage, options.onClose);
 
-  backdrop.onclick = () => closePanel(root, options.onClose);
+  backdrop.onclick = () => closePanel(options.onClose);
 
-  if (!textarea.disabled) {
-    textarea.focus({ preventScroll: true });
-  } else if (isNewPanel) {
-    closeBtn.focus({ preventScroll: true });
-  }
+  const focusTarget = !textarea.disabled
+    ? textarea
+    : options.pending && !sendBtn.disabled
+      ? sendBtn
+      : isFatalError
+        ? fatalFocusTarget ?? closeBtn
+        : closeBtn;
+  focusTarget.focus({ preventScroll: true });
 }
 
-function createPendingIndicator(onStop?: () => void): HTMLElement {
+function createPendingIndicator(): HTMLElement {
   const pending = document.createElement('div');
   pending.className = 'snapscreen-pending';
   pending.setAttribute('role', 'status');
   pending.setAttribute('aria-label', 'Loading');
   pending.innerHTML = '<div class="snapscreen-spinner"></div>';
-
-  if (onStop) {
-    const stopBtn = document.createElement('button');
-    stopBtn.type = 'button';
-    stopBtn.className = 'snapscreen-stop-btn';
-    stopBtn.textContent = 'Stop';
-    stopBtn.addEventListener('click', onStop);
-    pending.append(stopBtn);
-  }
 
   return pending;
 }
@@ -303,18 +413,39 @@ function createCopyButton(text: string): HTMLButtonElement {
   btn.innerHTML = COPY_ICON_SVG;
 
   btn.addEventListener('click', async () => {
+    let copied = false;
+
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      }
     } catch {
       // Clipboard API can be unavailable (e.g. insecure contexts) — fall back.
+    }
+
+    if (!copied) {
       const helper = document.createElement('textarea');
       helper.value = text;
       helper.style.position = 'fixed';
       helper.style.opacity = '0';
-      document.body.append(helper);
-      helper.select();
-      document.execCommand('copy');
-      helper.remove();
+      try {
+        getUiRoot().append(helper);
+        helper.select();
+        copied =
+          typeof document.execCommand === 'function' &&
+          document.execCommand('copy');
+      } catch {
+        copied = false;
+      } finally {
+        helper.remove();
+        btn.focus({ preventScroll: true });
+      }
+    }
+
+    if (!copied) {
+      showErrorToast('Could not copy the answer.');
+      return;
     }
 
     btn.innerHTML = CHECK_ICON_SVG;
@@ -330,47 +461,97 @@ function createCopyButton(text: string): HTMLButtonElement {
   return btn;
 }
 
+function createFailedFollowUpActions(
+  actions: NonNullable<ResultPanelOptions['failedFollowUpActions']>,
+): HTMLElement {
+  const actionRow = document.createElement('div');
+  actionRow.className = 'snapscreen-failed-actions';
+
+  const retryButton = document.createElement('button');
+  retryButton.type = 'button';
+  retryButton.className = 'snapscreen-failed-action';
+  retryButton.textContent = 'Retry';
+  retryButton.setAttribute('aria-label', 'Retry failed question');
+  retryButton.addEventListener('click', actions.onRetry);
+
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.className = 'snapscreen-failed-action snapscreen-failed-action-remove';
+  removeButton.textContent = 'Remove';
+  removeButton.setAttribute('aria-label', 'Remove failed question and response');
+  removeButton.addEventListener('click', actions.onRemove);
+
+  actionRow.append(retryButton, removeButton);
+  return actionRow;
+}
+
 function appendError(
   body: HTMLElement,
   message: string,
   errorCode?: string,
   onRetry?: () => void,
-): void {
+  onOpenSettings?: () => void,
+): HTMLButtonElement | null {
   const err = document.createElement('div');
   err.className = 'snapscreen-error';
+  err.setAttribute('role', 'alert');
   err.textContent = message;
+  let action: HTMLButtonElement | null = null;
 
   if (errorCode === 'no_api_key') {
     const btn = document.createElement('button');
     btn.className = 'snapscreen-btn snapscreen-btn-primary';
     btn.textContent = 'Open Settings';
-    btn.addEventListener('click', () => chrome.runtime.openOptionsPage());
+    btn.addEventListener('click', () => {
+      if (onOpenSettings) {
+        onOpenSettings();
+      } else {
+        void chrome.runtime.openOptionsPage();
+      }
+    });
     err.append(btn);
+    action = btn;
   } else if (onRetry && errorCode !== 'refusal') {
     const btn = document.createElement('button');
     btn.className = 'snapscreen-btn snapscreen-btn-primary';
     btn.textContent = 'Try again';
     btn.addEventListener('click', onRetry);
     err.append(btn);
+    action = btn;
   }
 
   body.append(err);
+  return action;
 }
 
 function resetPanelCursor(): void {
-  document.documentElement.classList.remove('snapscreen-panel-dragging');
-  document.body.style.cursor = '';
-  document.documentElement.style.cursor = '';
+  draggingPanel?.classList.remove('snapscreen-panel-dragging');
+  draggingPanel = null;
 }
 
-function closePanel(root: HTMLElement, onClose: () => void): void {
-  closeScreenshotLightbox();
+export function disposeResultPanel(): void {
+  cancelPanelFrames();
   panelPosition = null;
   panelPositioningAbort?.abort();
   panelPositioningAbort = null;
+  panelDragAbort?.abort();
+  panelDragAbort = null;
+  closeScreenshotLightbox(false);
+  if (toastTimeout !== null) {
+    clearTimeout(toastTimeout);
+    toastTimeout = null;
+  }
   resetPanelCursor();
-  root.remove();
-  document.getElementById(BACKDROP_ID)?.remove();
+  queryUiElement(`#${PANEL_ID}`)?.remove();
+  queryUiElement(`#${BACKDROP_ID}`)?.remove();
+  queryUiElement(`#${LIGHTBOX_ID}`)?.remove();
+  queryUiElement(`#${TOAST_ID}`)?.remove();
+  removeUiHostIfEmpty();
+
+}
+
+function closePanel(onClose: () => void): void {
+  disposeResultPanel();
   onClose();
 }
 
@@ -396,7 +577,10 @@ function trapFocus(container: HTMLElement, event: KeyboardEvent): void {
 
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
-  const active = document.activeElement as HTMLElement | null;
+  const root = container.getRootNode();
+  const active = root instanceof ShadowRoot
+    ? root.activeElement as HTMLElement | null
+    : document.activeElement as HTMLElement | null;
 
   if (event.shiftKey) {
     if (active === first || !container.contains(active)) {
@@ -412,16 +596,32 @@ function trapFocus(container: HTMLElement, event: KeyboardEvent): void {
   }
 }
 
-function closeScreenshotLightbox(): void {
+function closeScreenshotLightbox(restoreFocus = true): void {
   lightboxAbort?.abort();
   lightboxAbort = null;
 
-  const lightbox = document.getElementById(LIGHTBOX_ID);
+  const lightbox = queryUiElement(`#${LIGHTBOX_ID}`);
   lightbox?.remove();
+  if (lightboxBackgroundPanel) {
+    lightboxBackgroundPanel.inert = false;
+    if (lightboxBackgroundAriaHidden === null) {
+      lightboxBackgroundPanel.removeAttribute('aria-hidden');
+    } else {
+      lightboxBackgroundPanel.setAttribute(
+        'aria-hidden',
+        lightboxBackgroundAriaHidden,
+      );
+    }
+  }
+  lightboxBackgroundPanel = null;
+  lightboxBackgroundAriaHidden = null;
+  removeUiHostIfEmpty();
 
   const returnFocus = lightboxReturnFocus;
   lightboxReturnFocus = null;
-  returnFocus?.focus();
+  if (restoreFocus) {
+    returnFocus?.focus();
+  }
 }
 
 function openScreenshotLightbox(dataUrl: string, returnFocusEl: HTMLElement): void {
@@ -455,7 +655,15 @@ function openScreenshotLightbox(dataUrl: string, returnFocusEl: HTMLElement): vo
 
   dialog.append(closeBtn, img);
   lightbox.append(backdrop, dialog);
-  document.documentElement.append(lightbox);
+  getUiRoot().append(lightbox);
+
+  const panel = queryUiElement<HTMLElement>(`#${PANEL_ID}`);
+  if (panel) {
+    lightboxBackgroundPanel = panel;
+    lightboxBackgroundAriaHidden = panel.getAttribute('aria-hidden');
+    panel.inert = true;
+    panel.setAttribute('aria-hidden', 'true');
+  }
 
   lightboxReturnFocus = returnFocusEl;
 
@@ -516,7 +724,7 @@ function ensurePanelInViewport(
 ): void {
   const size = getPanelSize(panel);
   if ((size.width === 0 || size.height === 0) && retry < 2) {
-    requestAnimationFrame(() => ensurePanelInViewport(panel, preferred, retry + 1));
+    schedulePanelFrame(() => ensurePanelInViewport(panel, preferred, retry + 1));
     return;
   }
 
@@ -558,18 +766,15 @@ function setupPanelPositioningListeners(
 
   window.addEventListener('resize', reclamp, { signal });
 
-  window.addEventListener(
-    'keydown',
-    (event) => {
-      if (event.key !== 'Escape') return;
-      // The lightbox handles its own Escape; only close the panel when no lightbox is open.
-      if (document.getElementById(LIGHTBOX_ID)) return;
-      closePanel(panel, onClose);
-    },
-    { signal, capture: true },
-  );
-
-  panel.addEventListener('keydown', (event) => trapFocus(panel, event), { signal });
+  panel.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closePanel(onClose);
+      return;
+    }
+    trapFocus(panel, event);
+  }, { signal });
 
   const resizeObserver = new ResizeObserver(reclamp);
   resizeObserver.observe(panel);
@@ -577,7 +782,7 @@ function setupPanelPositioningListeners(
 
   if (panelImage) {
     if (panelImage.complete) {
-      requestAnimationFrame(reclamp);
+      schedulePanelFrame(reclamp);
     } else {
       panelImage.addEventListener('load', reclamp, { signal });
       panelImage.addEventListener('error', reclamp, { signal });
@@ -586,6 +791,10 @@ function setupPanelPositioningListeners(
 }
 
 function setupDrag(dragHandle: HTMLElement, panel: HTMLElement): void {
+  panelDragAbort?.abort();
+  const abort = new AbortController();
+  panelDragAbort = abort;
+
   dragHandle.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
 
@@ -595,11 +804,8 @@ function setupDrag(dragHandle: HTMLElement, panel: HTMLElement): void {
     const rect = panel.getBoundingClientRect();
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
-    const root = document.documentElement;
-
-    root.classList.add('snapscreen-panel-dragging');
-    document.body.style.cursor = 'grabbing';
-    root.style.cursor = 'grabbing';
+    draggingPanel = panel;
+    panel.classList.add('snapscreen-panel-dragging');
 
     function onMove(ev: PointerEvent): void {
       applyPanelPosition(panel, ev.clientY - offsetY, ev.clientX - offsetX);
@@ -615,11 +821,11 @@ function setupDrag(dragHandle: HTMLElement, panel: HTMLElement): void {
       dragHandle.removeEventListener('pointercancel', onUp);
     }
 
-    dragHandle.addEventListener('pointermove', onMove);
-    dragHandle.addEventListener('pointerup', onUp);
-    dragHandle.addEventListener('pointercancel', onUp);
+    dragHandle.addEventListener('pointermove', onMove, { signal: abort.signal });
+    dragHandle.addEventListener('pointerup', onUp, { signal: abort.signal });
+    dragHandle.addEventListener('pointercancel', onUp, { signal: abort.signal });
     onMove(e);
-  });
+  }, { signal: abort.signal });
 }
 
 function positionPanel(panel: HTMLElement, anchorRect?: Rect): void {
@@ -630,16 +836,11 @@ function positionPanel(panel: HTMLElement, anchorRect?: Rect): void {
 
   const preferred = getPreferredPanelPosition(anchorRect);
   applyPanelPosition(panel, preferred.top, preferred.left);
-  requestAnimationFrame(() => ensurePanelInViewport(panel, preferred));
+  schedulePanelFrame(() => ensurePanelInViewport(panel, preferred));
 }
 
-/**
- * Incrementally renders the in-progress answer while the API streams.
- * The final ANALYZE_RESULT re-render replaces this bubble with the
- * permanent one (including its copy button).
- */
 export function updateStreamingAnswer(text: string): void {
-  const root = document.getElementById(PANEL_ID);
+  const root = queryUiElement(`#${PANEL_ID}`);
   const body = root?.querySelector('.snapscreen-panel-body');
   if (!body) return;
 
@@ -662,11 +863,22 @@ export function updateStreamingAnswer(text: string): void {
 }
 
 export function showErrorToast(message: string): void {
+  if (toastTimeout !== null) {
+    clearTimeout(toastTimeout);
+  }
+  queryUiElement(`#${TOAST_ID}`)?.remove();
+
   const toast = document.createElement('div');
   toast.id = TOAST_ID;
   toast.className = 'snapscreen-toast';
+  toast.setAttribute('role', 'alert');
+  toast.setAttribute('aria-live', 'assertive');
   toast.textContent = message;
-  document.documentElement.append(toast);
+  getUiRoot().append(toast);
 
-  setTimeout(() => toast.remove(), 4000);
+  toastTimeout = setTimeout(() => {
+    toast.remove();
+    toastTimeout = null;
+    removeUiHostIfEmpty();
+  }, 4000);
 }

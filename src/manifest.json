@@ -3,18 +3,25 @@
   "name": "SnapScreen",
   "description": "Turn any on-screen question into an instant answer",
   "version": "1.0.0",
+  "minimum_chrome_version": "116",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["https://api.anthropic.com/*"],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://api.anthropic.com data:; object-src 'none'; base-uri 'none'"
+  },
   "action": {
     "default_title": "SnapScreen – Snip and analyze",
     "default_icon": {
       "16": "src/assets/icons/icon16.png",
+      "24": "src/assets/icons/icon24.png",
+      "32": "src/assets/icons/icon32.png",
       "48": "src/assets/icons/icon48.png",
       "128": "src/assets/icons/icon128.png"
     }
   },
   "icons": {
     "16": "src/assets/icons/icon16.png",
+    "32": "src/assets/icons/icon32.png",
     "48": "src/assets/icons/icon48.png",
     "128": "src/assets/icons/icon128.png"
   },
@@ -35,6 +42,10 @@
   "web_accessible_resources": [
     {
       "resources": ["src/assets/icons/icon16.png"],
+      "matches": ["http://*/*", "https://*/*"]
+    },
+    {
+      "resources": ["src/ui/result-frame.html"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ]

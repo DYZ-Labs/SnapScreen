@@ -1,5 +1,7 @@
 # SnapScreen Improvement Plan
 
+> **Historical document:** This audit describes an earlier version of SnapScreen and is retained for context only. Several findings and proposed features below have since been implemented or superseded; verify every item against the current code before acting on it.
+
 A read-only audit of the codebase (all of `src/`, the manifest, build config, and styles) with prioritized recommendations. **No changes have been made** — this document is the deliverable; each item should be approved before implementation.
 
 Effort scale: **XS** = minutes, **S** = under an hour, **M** = a few hours, **L** = a day or more.

@@ -8,11 +8,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "tsc --noEmit && vite build",
+    "test:browser": "node scripts/extension-smoke.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.7.0",
     "@types/chrome": "^0.2.0",
+    "happy-dom": "^20.10.6",
+    "playwright": "^1.61.1",
     "typescript": "~6.0.2",
     "vite": "^8.0.12",
     "vitest": "^4.1.10"
