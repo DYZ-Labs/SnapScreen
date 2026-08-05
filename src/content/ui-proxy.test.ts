@@ -52,8 +52,17 @@ vi.mock('./result-frame-host', () => ({
 
 import {
   disposeResultPanel,
-  startSnipOverlay,
+  startSnipOverlay as startSnipOverlayInternal,
 } from './ui-proxy';
+
+const TEST_DATA_URL = 'data:image/png;base64,FROZEN';
+
+function startSnipOverlay(options: {
+  onRegionSelected: (rect: { x: number; y: number; width: number; height: number }) => void;
+  onCancelled: () => void;
+}): ReturnType<typeof startSnipOverlayInternal> {
+  return startSnipOverlayInternal({ ...options, dataUrl: TEST_DATA_URL });
+}
 
 beforeEach(() => {
   mockState.instances.length = 0;
@@ -78,6 +87,7 @@ describe('isolated UI proxy lifecycle', () => {
 
     expect(mockState.instances[0].send).toHaveBeenCalledWith({
       type: 'SNAPSCREEN_UI_START_SNIP',
+      dataUrl: TEST_DATA_URL,
     });
   });
 

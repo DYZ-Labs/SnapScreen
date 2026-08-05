@@ -55,6 +55,7 @@ if (bootstrap) {
       case 'SNAPSCREEN_UI_START_SNIP':
         disposeResultPanel();
         startSnipOverlay({
+          dataUrl: value.dataUrl,
           onRegionSelected(rect) {
             post({ type: 'SNAPSCREEN_UI_REGION_SELECTED', sessionId, rect });
           },

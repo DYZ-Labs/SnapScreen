@@ -188,8 +188,18 @@ function stopGeneration(): void {
 }
 
 function handleResnip(publicSettings: SnapScreenSessionSettings): void {
-  // Closing the panel disposes the previous session before this callback runs.
-  beginSnip(publicSettings);
+  requestNewSnip(publicSettings);
+}
+
+function requestNewSnip(publicSettings: SnapScreenSessionSettings): void {
+  const sessionSettings = {
+    defaultPrompt: publicSettings.defaultPrompt,
+    limits: { ...publicSettings.limits },
+  };
+  disposeSession();
+  void sendMessage({ type: 'REQUEST_SNIP', sessionSettings }).catch(() => {
+    showErrorToast('SnapScreen could not start a new capture. Please try again.');
+  });
 }
 
 function handleGenerationTransportFailure(requestId: string): void {
@@ -417,15 +427,17 @@ function showCaptureFailure(messageCaptureId: string, message: string, code: str
   if (!matchesPendingCapture(captureId, capturePending, messageCaptureId)) return;
 
   capturePending = false;
-  retryLastRequest = () => beginSnip();
+  retryLastRequest = () => requestNewSnip({
+    defaultPrompt: sessionPrompt,
+    limits: { ...sessionLimits },
+  });
   renderPanel({ pending: false, error: message, errorCode: code });
 }
 
 function beginSnip(
-  publicSettings: SnapScreenSessionSettings = {
-    defaultPrompt: sessionPrompt,
-    limits: sessionLimits,
-  },
+  nextCaptureId: string,
+  frozenDataUrl: string,
+  publicSettings: SnapScreenSessionSettings,
 ): void {
   // This synchronously requests cancellation before installing the new overlay.
   disposeSession();
@@ -433,11 +445,11 @@ function beginSnip(
   sessionPrompt = publicSettings.defaultPrompt.trim() || DEFAULT_PROMPT;
   sessionLimits = normalizeLimits(publicSettings.limits);
 
-  const nextCaptureId = crypto.randomUUID();
   sessionDisposal.begin();
   captureId = nextCaptureId;
   capturePending = true;
   disposeOverlay = startSnipOverlay({
+    dataUrl: frozenDataUrl,
     onRegionSelected(rect) {
       if (!matchesPendingCapture(captureId, capturePending, nextCaptureId)) return;
       disposeOverlay = null;
@@ -447,6 +459,7 @@ function beginSnip(
         rect,
         devicePixelRatio: window.devicePixelRatio,
         captureId: nextCaptureId,
+        dataUrl: frozenDataUrl,
       })
         .then((response) => {
           if (!matchesPendingCapture(captureId, capturePending, nextCaptureId)) return;
@@ -481,13 +494,24 @@ function beginSnip(
 if (!window.__snapscreenListenerReady) {
   window.__snapscreenListenerReady = true;
 
-  chrome.runtime.onMessage.addListener((message: BgToCsMessage) => {
+  chrome.runtime.onMessage.addListener((message: BgToCsMessage, _sender, sendResponse) => {
     switch (message.type) {
-      case 'START_SNIP':
-        beginSnip({
-          defaultPrompt: message.defaultPrompt,
-          limits: message.limits,
+      case 'PREPARE_SNIP_CAPTURE':
+        disposeSession();
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => sendResponse({ ok: true }));
         });
+        return true;
+
+      case 'START_SNIP':
+        beginSnip(
+          message.captureId,
+          message.dataUrl,
+          {
+            defaultPrompt: message.defaultPrompt,
+            limits: message.limits,
+          },
+        );
         break;
 
       case 'CROPPED_IMAGE':
@@ -548,5 +572,6 @@ if (!window.__snapscreenListenerReady) {
         showErrorToast(message.message);
         break;
     }
+    return undefined;
   });
 }

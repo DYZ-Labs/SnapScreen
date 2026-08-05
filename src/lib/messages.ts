@@ -26,8 +26,11 @@ export type DisplayMessage = {
 };
 
 export type BgToCsMessage =
+  | { type: 'PREPARE_SNIP_CAPTURE' }
   | {
       type: 'START_SNIP';
+      captureId: string;
+      dataUrl: string;
       hasApiKey: boolean;
       defaultPrompt: string;
       limits: SnapScreenLimits;
@@ -60,7 +63,14 @@ export type BgToCsMessage =
   | { type: 'SHOW_ERROR'; message: string };
 
 export type CsToBgMessage =
-  | { type: 'CAPTURE_REGION'; rect: Rect; devicePixelRatio: number; captureId: string }
+  | {
+      type: 'CAPTURE_REGION';
+      rect: Rect;
+      devicePixelRatio: number;
+      captureId: string;
+      dataUrl: string;
+    }
+  | { type: 'REQUEST_SNIP'; sessionSettings: SnapScreenSessionSettings }
   | {
       type: 'ANALYZE';
       dataUrl: string;

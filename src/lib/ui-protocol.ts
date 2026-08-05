@@ -8,6 +8,7 @@ export const UI_CLAIM_CAPABILITY = 'SNAPSCREEN_UI_CLAIM_CAPABILITY' as const;
 export const UI_REVOKE_CAPABILITY = 'SNAPSCREEN_UI_REVOKE_CAPABILITY' as const;
 
 const MAX_PROTOCOL_TEXT = 2_000_000;
+const MAX_SCREENSHOT_DATA_URL = 32_000_000;
 const MAX_PROTOCOL_MESSAGES = 200;
 
 export type UiPanelAction =
@@ -37,6 +38,7 @@ export type ControllerToFrameMessage =
   | {
       type: 'SNAPSCREEN_UI_START_SNIP';
       sessionId: string;
+      dataUrl: string;
     }
   | { type: 'SNAPSCREEN_UI_DISPOSE_SNIP'; sessionId: string }
   | {
@@ -204,11 +206,13 @@ export function isControllerToFrameMessage(
   if (expectedSessionId !== undefined && value.sessionId !== expectedSessionId) return false;
 
   switch (value.type) {
-    case 'SNAPSCREEN_UI_START_SNIP':
     case 'SNAPSCREEN_UI_DISPOSE_SNIP':
     case 'SNAPSCREEN_UI_DISPOSE_RESULT':
     case 'SNAPSCREEN_UI_DISPOSE_ALL':
       return true;
+    case 'SNAPSCREEN_UI_START_SNIP':
+      return isBoundedString(value.dataUrl, MAX_SCREENSHOT_DATA_URL)
+        && value.dataUrl.startsWith('data:image/png;base64,');
     case 'SNAPSCREEN_UI_RENDER_RESULT':
       return isSerializedResultPanelState(value.state);
     case 'SNAPSCREEN_UI_UPDATE_STREAM':

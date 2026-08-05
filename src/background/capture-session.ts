@@ -21,16 +21,19 @@ export interface CaptureTabDependencies {
   cropImage: (dataUrl: string, rect: Rect, devicePixelRatio: number) => Promise<string>;
 }
 
-export interface CaptureTabInput {
+export interface CaptureViewportInput {
   tabId: number;
   windowId: number;
-  rect: Rect;
-  devicePixelRatio: number;
   isCurrent: () => boolean;
 }
 
+export interface CaptureTabInput extends CaptureViewportInput {
+  rect: Rect;
+  devicePixelRatio: number;
+}
+
 async function assertInitiatingTabIsActive(
-  deps: CaptureTabDependencies,
+  deps: Pick<CaptureTabDependencies, 'getActiveTab'>,
   tabId: number,
   windowId: number,
 ): Promise<void> {
@@ -46,6 +49,15 @@ export async function captureInitiatingTab(
   deps: CaptureTabDependencies,
   input: CaptureTabInput,
 ): Promise<string> {
+  const dataUrl = await captureInitiatingViewport(deps, input);
+  assertCurrent(input.isCurrent);
+  return deps.cropImage(dataUrl, input.rect, input.devicePixelRatio);
+}
+
+export async function captureInitiatingViewport(
+  deps: Omit<CaptureTabDependencies, 'cropImage'>,
+  input: CaptureViewportInput,
+): Promise<string> {
   const activationVersion = deps.getActivationVersion(input.windowId);
   assertCurrent(input.isCurrent);
   await assertInitiatingTabIsActive(deps, input.tabId, input.windowId);
@@ -59,5 +71,5 @@ export async function captureInitiatingTab(
   await assertInitiatingTabIsActive(deps, input.tabId, input.windowId);
   assertCurrent(input.isCurrent);
 
-  return deps.cropImage(dataUrl, input.rect, input.devicePixelRatio);
+  return dataUrl;
 }

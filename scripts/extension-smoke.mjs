@@ -335,6 +335,8 @@ async function injectAndStartSnip(worker, contentLoader, { apiKey, hasApiKey }) 
 
       const message = {
         type: 'START_SNIP',
+        captureId: crypto.randomUUID(),
+        dataUrl: croppedDataUrl,
         hasApiKey,
         defaultPrompt: hiddenPrompt,
         limits: {

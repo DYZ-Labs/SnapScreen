@@ -233,10 +233,13 @@ function dispatch(
   });
 }
 
-function captureRequest(captureId: string): CsToBgMessage {
+function captureRequest(
+  captureId: string,
+): Extract<CsToBgMessage, { type: 'CAPTURE_REGION' }> {
   return {
     type: 'CAPTURE_REGION',
     captureId,
+    dataUrl: `data:image/png;base64,FULL_${captureId}`,
     devicePixelRatio: 2,
     rect: { x: 10, y: 20, width: 100, height: 50 },
   };
@@ -369,9 +372,9 @@ describe('service worker message integration', () => {
       ok: true,
     });
 
-    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    expect(harness.tabs.captureVisibleTab).not.toHaveBeenCalled();
     expect(dependencies.cropImage).toHaveBeenCalledWith(
-      'data:image/png;base64,FULL',
+      'data:image/png;base64,FULL_capture-1',
       { x: 10, y: 20, width: 100, height: 50 },
       2,
     );
@@ -387,43 +390,37 @@ describe('service worker message integration', () => {
   });
 
   it('drops an in-flight capture when the tab starts navigating', async () => {
-    const fullCapture = deferred<string>();
+    const crop = deferred<string>();
     const harness = await loadWorker();
-    harness.tabs.captureVisibleTab.mockReturnValueOnce(fullCapture.promise);
+    dependencies.cropImage.mockReturnValueOnce(crop.promise);
 
     const response = dispatch(harness, captureRequest('capture-before-navigation'));
-    await vi.waitFor(() => expect(harness.tabs.captureVisibleTab).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(dependencies.cropImage).toHaveBeenCalledOnce());
 
     harness.updated.emit(
       7,
       { status: 'loading' },
       trustedSender().tab!,
     );
-    fullCapture.resolve('data:image/png;base64,OLD_PAGE');
+    crop.resolve('data:image/png;base64,OLD_PAGE');
 
     await expect(response).resolves.toEqual({ ok: false, stale: true });
-    expect(dependencies.cropImage).not.toHaveBeenCalled();
     expect(harness.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
   it('delivers only the newest overlapping capture', async () => {
-    const firstCapture = deferred<string>();
+    const firstCrop = deferred<string>();
     const harness = await loadWorker();
-    harness.tabs.captureVisibleTab
-      .mockReturnValueOnce(firstCapture.promise)
-      .mockResolvedValueOnce('data:image/png;base64,FULL_SECOND');
-    dependencies.cropImage.mockImplementation(async (dataUrl: string) =>
-      dataUrl.includes('SECOND')
-        ? 'data:image/png;base64,CROP_SECOND'
-        : 'data:image/png;base64,CROP_FIRST',
-    );
+    dependencies.cropImage
+      .mockReturnValueOnce(firstCrop.promise)
+      .mockResolvedValueOnce('data:image/png;base64,CROP_SECOND');
 
     const firstResponse = dispatch(harness, captureRequest('capture-1'));
-    await vi.waitFor(() => expect(harness.tabs.captureVisibleTab).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(dependencies.cropImage).toHaveBeenCalledOnce());
     const secondResponse = dispatch(harness, captureRequest('capture-2'));
 
     await expect(secondResponse).resolves.toEqual({ ok: true });
-    firstCapture.resolve('data:image/png;base64,FULL_FIRST');
+    firstCrop.resolve('data:image/png;base64,CROP_FIRST');
     await expect(firstResponse).resolves.toEqual({ ok: false, stale: true });
 
     expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(1);
@@ -739,16 +736,29 @@ describe('service worker message integration', () => {
     await vi.waitFor(() => {
       expect(harness.tabs.sendMessage).toHaveBeenCalledWith(
         7,
-        {
+        expect.objectContaining({
           type: 'START_SNIP',
+          dataUrl: 'data:image/png;base64,FULL',
           hasApiKey: true,
           defaultPrompt: 'Answer the question.',
           limits: testLimits,
-        },
+        }),
         { documentId: 'document-1' },
       );
     });
 
+    expect(harness.tabs.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      7,
+      { type: 'PREPARE_SNIP_CAPTURE' },
+      { documentId: 'document-1' },
+    );
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    const prepareOrder = harness.tabs.sendMessage.mock.invocationCallOrder[0];
+    const captureOrder = harness.tabs.captureVisibleTab.mock.invocationCallOrder[0];
+    const startOrder = harness.tabs.sendMessage.mock.invocationCallOrder[1];
+    expect(prepareOrder).toBeLessThan(captureOrder);
+    expect(captureOrder).toBeLessThan(startOrder);
     expect(harness.scripting.executeScript).toHaveBeenCalledWith({
       target: { tabId: 7 },
       files: ['content-script.js'],
@@ -756,6 +766,21 @@ describe('service worker message integration', () => {
     expect(harness.scripting.insertCSS).not.toHaveBeenCalled();
     expect(JSON.stringify(harness.tabs.sendMessage.mock.calls)).not.toContain(
       'sk-ant-test-secret',
+    );
+
+    const startMessage = harness.tabs.sendMessage.mock.calls
+      .map(([, message]) => message as { type?: string; captureId?: string })
+      .find((message) => message.type === 'START_SNIP');
+    const captureId = startMessage?.captureId;
+    expect(captureId).toBeTypeOf('string');
+    await expect(dispatch(harness, {
+      ...captureRequest(captureId!),
+      dataUrl: 'data:image/png;base64,CONTENT_FALLBACK',
+    })).resolves.toEqual({ ok: true });
+    expect(dependencies.cropImage).toHaveBeenLastCalledWith(
+      'data:image/png;base64,FULL',
+      { x: 10, y: 20, width: 100, height: 50 },
+      2,
     );
   });
 
@@ -772,6 +797,30 @@ describe('service worker message integration', () => {
       );
     });
     expect(harness.scripting.executeScript).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the active session settings when requesting a new snip', async () => {
+    const harness = await loadWorker();
+    const sessionSettings = {
+      defaultPrompt: 'Keep this session prompt.',
+      limits: { ...testLimits, maxConversationTurns: 4 },
+    };
+
+    await expect(dispatch(harness, {
+      type: 'REQUEST_SNIP',
+      sessionSettings,
+    })).resolves.toEqual({ ok: true });
+
+    expect(harness.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: 'START_SNIP',
+        dataUrl: 'data:image/png;base64,FULL',
+        defaultPrompt: sessionSettings.defaultPrompt,
+        limits: sessionSettings.limits,
+      }),
+      { documentId: 'document-1' },
+    );
   });
 
   it('waits for slow content initialization before sending START_SNIP', async () => {
@@ -798,7 +847,7 @@ describe('service worker message integration', () => {
         { documentId: 'document-1' },
       );
     });
-    expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(2);
   });
 
   it('activates an already-loaded content script exactly once per invocation', async () => {
@@ -807,18 +856,18 @@ describe('service worker message integration', () => {
 
     harness.actionClicked.emit(tab);
     await vi.waitFor(() => {
-      expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(1);
+      expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(2);
     });
 
     harness.actionClicked.emit(tab);
     await vi.waitFor(() => {
-      expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(2);
+      expect(harness.tabs.sendMessage).toHaveBeenCalledTimes(4);
     });
 
     expect(harness.scripting.executeScript).toHaveBeenCalledTimes(2);
-    expect(harness.tabs.sendMessage.mock.calls.every(([, message]) => (
+    expect(harness.tabs.sendMessage.mock.calls.filter(([, message]) => (
       message as { type?: string }
-    ).type === 'START_SNIP')).toBe(true);
+    ).type === 'START_SNIP')).toHaveLength(2);
   });
 
   it('bounds stalled initialization and shows visible browser feedback', async () => {

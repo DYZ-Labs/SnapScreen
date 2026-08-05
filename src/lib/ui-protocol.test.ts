@@ -91,6 +91,7 @@ describe('extension-frame protocol validation', () => {
     expect(isControllerToFrameMessage({
       type: 'SNAPSCREEN_UI_START_SNIP',
       sessionId,
+      dataUrl: 'data:image/png;base64,FROZEN',
     }, sessionId)).toBe(true);
   });
 

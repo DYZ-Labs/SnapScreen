@@ -16,6 +16,7 @@ const HINT_ID = 'snapscreen-overlay-instructions';
 const SNIP_INSTRUCTION = 'Drag to select a region. Click to cancel';
 
 export interface SnipOverlayOptions {
+  dataUrl: string;
   onRegionSelected: (rect: Rect) => void;
   onCancelled: () => void;
 }
@@ -51,6 +52,13 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   root.setAttribute('aria-label', 'Select a screen region');
   root.setAttribute('aria-describedby', HINT_ID);
 
+  const frozenPage = document.createElement('img');
+  frozenPage.className = 'snapscreen-frozen-page';
+  frozenPage.src = options.dataUrl;
+  frozenPage.alt = '';
+  frozenPage.draggable = false;
+  frozenPage.setAttribute('aria-hidden', 'true');
+
   const dim = document.createElement('div');
   dim.className = 'snapscreen-dim';
 
@@ -72,7 +80,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   liveStatus.setAttribute('role', 'status');
   liveStatus.setAttribute('aria-live', 'polite');
 
-  root.append(dim, selection, sizeBadge, hint, liveStatus);
+  root.append(frozenPage, dim, selection, sizeBadge, hint, liveStatus);
   uiRoot.append(root);
 
   let startX = 0;

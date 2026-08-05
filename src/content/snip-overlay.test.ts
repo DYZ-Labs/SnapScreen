@@ -1,7 +1,11 @@
 /** @vitest-environment happy-dom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { disposeSnipOverlay, startSnipOverlay } from './snip-overlay';
+import {
+  disposeSnipOverlay,
+  startSnipOverlay as startSnipOverlayInternal,
+  type SnipOverlayOptions,
+} from './snip-overlay';
 import {
   disposeUiRootForTesting,
   getUiHostForTesting,
@@ -9,6 +13,7 @@ import {
 } from './ui-root';
 
 const EXPECTED_INSTRUCTION = 'Drag to select a region. Click to cancel';
+const TEST_DATA_URL = 'data:image/png;base64,FROZEN';
 const FORBIDDEN_INSTRUCTIONS = [
   'Keyboard:',
   'Escape cancels',
@@ -20,6 +25,12 @@ const FORBIDDEN_INSTRUCTIONS = [
 
 function uiQuery<T extends Element = HTMLElement>(selector: string): T | null {
   return getUiRootForTesting()?.querySelector<T>(selector) ?? null;
+}
+
+function startSnipOverlay(
+  options: Omit<SnipOverlayOptions, 'dataUrl'>,
+): ReturnType<typeof startSnipOverlayInternal> {
+  return startSnipOverlayInternal({ ...options, dataUrl: TEST_DATA_URL });
 }
 
 function expectCanonicalInstruction(): void {
@@ -79,6 +90,8 @@ describe('snip overlay isolation and disposal', () => {
     expect(overlay?.getAttribute('aria-describedby')).toBe(
       'snapscreen-overlay-instructions',
     );
+    expect(uiQuery<HTMLImageElement>('.snapscreen-frozen-page')?.getAttribute('src'))
+      .toBe(TEST_DATA_URL);
     expect(getUiRootForTesting()?.activeElement).toBe(overlay);
     expectCanonicalInstruction();
   });

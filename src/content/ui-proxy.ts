@@ -157,7 +157,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   overlayOptions = options;
   const host = ensureHost();
   host.setInteractive(true);
-  host.send({ type: 'SNAPSCREEN_UI_START_SNIP' });
+  host.send({ type: 'SNAPSCREEN_UI_START_SNIP', dataUrl: options.dataUrl });
 
   let disposed = false;
   return () => {

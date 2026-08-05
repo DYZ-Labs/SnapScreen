@@ -20,7 +20,7 @@ import {
 import {
   ActiveTabChangedError,
   CaptureSupersededError,
-  captureInitiatingTab,
+  captureInitiatingViewport,
 } from './capture-session';
 import { GenerationRegistry, type ActiveGeneration } from './generation-registry';
 import {
@@ -41,7 +41,13 @@ interface CaptureRecord extends DocumentTarget {
   captureId: string;
 }
 
+interface FrozenCapture {
+  dataUrl: string;
+  tabId: number;
+}
+
 const captureByDocument = new Map<string, CaptureRecord>();
+const frozenCaptureById = new Map<string, FrozenCapture>();
 const activationVersionByWindow = new Map<number, number>();
 const badgeClearTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const actionFeedbackVersionByTab = new Map<number, number>();
@@ -104,6 +110,9 @@ function clearTabState(tabId: number): void {
   }
   for (const [key, capture] of captureByDocument) {
     if (capture.tabId === tabId) captureByDocument.delete(key);
+  }
+  for (const [captureId, capture] of frozenCaptureById) {
+    if (capture.tabId === tabId) frozenCaptureById.delete(captureId);
   }
 }
 
@@ -311,16 +320,23 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-async function startSnip(tabId: number, expectedDocumentVersion: number): Promise<void> {
+async function startSnip(
+  tabId: number,
+  windowId: number,
+  expectedDocumentVersion: number,
+  requestedSettings?: SnapScreenSessionSettings,
+): Promise<void> {
   try {
-    const settings = await getSettings();
-    const injectionResults = await withTimeout(
-      chrome.scripting.executeScript({
-        target: { tabId },
-        files: [contentScript],
-      }),
-      SNIP_START_TIMEOUT_MS,
-    );
+    const [storedSettings, injectionResults] = await Promise.all([
+      getSettings(),
+      withTimeout(
+        chrome.scripting.executeScript({
+          target: { tabId },
+          files: [contentScript],
+        }),
+        SNIP_START_TIMEOUT_MS,
+      ),
+    ]);
 
     if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) {
       await showActionBadge(
@@ -335,15 +351,52 @@ async function startSnip(tabId: number, expectedDocumentVersion: number): Promis
       throw new Error('SnapScreen could not identify the injected page document.');
     }
 
-    await sendToDocument(
-      { tabId, documentId: topFrameResult.documentId },
+    const target = { tabId, documentId: topFrameResult.documentId };
+    await withTimeout(
+      sendToDocument(target, { type: 'PREPARE_SNIP_CAPTURE' }),
+      SNIP_START_TIMEOUT_MS,
+    );
+
+    const dataUrl = await captureInitiatingViewport(
       {
-        type: 'START_SNIP',
-        hasApiKey: Boolean(settings.apiKey),
-        defaultPrompt: settings.defaultPrompt,
-        limits: settings.limits,
+        getActiveTab: async (targetWindowId) => {
+          const [activeTab] = await chrome.tabs.query({
+            active: true,
+            windowId: targetWindowId,
+          });
+          return activeTab ?? null;
+        },
+        getActivationVersion: (targetWindowId) =>
+          activationVersionByWindow.get(targetWindowId) ?? 0,
+        captureVisibleTab: (targetWindowId) =>
+          chrome.tabs.captureVisibleTab(targetWindowId, { format: 'png' }),
+      },
+      {
+        tabId,
+        windowId,
+        isCurrent: () =>
+          (documentVersionByTab.get(tabId) ?? 0) === expectedDocumentVersion,
       },
     );
+    const settings = getRequestSessionSettings(requestedSettings, storedSettings);
+    const captureId = crypto.randomUUID();
+    frozenCaptureById.set(captureId, { dataUrl, tabId });
+    try {
+      await sendToDocument(
+        target,
+        {
+          type: 'START_SNIP',
+          captureId,
+          dataUrl,
+          hasApiKey: Boolean(storedSettings.apiKey),
+          defaultPrompt: settings.defaultPrompt,
+          limits: settings.limits,
+        },
+      );
+    } catch (error) {
+      frozenCaptureById.delete(captureId);
+      throw error;
+    }
   } catch {
     if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) {
       await showActionBadge(
@@ -376,7 +429,11 @@ async function handleStartSnip(tab?: chrome.tabs.Tab): Promise<void> {
     return;
   }
 
-  await startSnip(resolved.id, documentVersionByTab.get(resolved.id) ?? 0);
+  await startSnip(
+    resolved.id,
+    resolved.windowId,
+    documentVersionByTab.get(resolved.id) ?? 0,
+  );
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -438,6 +495,21 @@ chrome.runtime.onMessage.addListener((
   void (async () => {
     try {
       switch (message.type) {
+        case 'REQUEST_SNIP': {
+          if (senderTab.windowId === undefined) {
+            sendResponse({ error: 'No tab context' });
+            return;
+          }
+          await startSnip(
+            tabId,
+            senderTab.windowId,
+            documentVersionByTab.get(tabId) ?? 0,
+            message.sessionSettings,
+          );
+          sendResponse({ ok: true });
+          break;
+        }
+
         case 'CAPTURE_REGION': {
           if (senderTab.windowId === undefined) {
             sendResponse({ error: 'No tab context' });
@@ -451,25 +523,14 @@ chrome.runtime.onMessage.addListener((
           }
 
           try {
-            const cropped = await captureInitiatingTab(
-              {
-                getActiveTab: async (windowId) => {
-                  const [activeTab] = await chrome.tabs.query({ active: true, windowId });
-                  return activeTab ?? null;
-                },
-                getActivationVersion: (windowId) =>
-                  activationVersionByWindow.get(windowId) ?? 0,
-                captureVisibleTab: (windowId) =>
-                  chrome.tabs.captureVisibleTab(windowId, { format: 'png' }),
-                cropImage,
-              },
-              {
-                tabId,
-                windowId: senderTab.windowId,
-                rect: message.rect,
-                devicePixelRatio: message.devicePixelRatio,
-                isCurrent: () => isCurrentCapture(target, message.captureId),
-              },
+            const frozenCapture = frozenCaptureById.get(message.captureId);
+            frozenCaptureById.delete(message.captureId);
+            const cropped = await cropImage(
+              frozenCapture?.tabId === tabId
+                ? frozenCapture.dataUrl
+                : message.dataUrl,
+              message.rect,
+              message.devicePixelRatio,
             );
 
             if (!isCurrentCapture(target, message.captureId)) {
@@ -640,6 +701,7 @@ chrome.runtime.onMessage.addListener((
         case 'SNIP_CANCELLED': {
           const target = getDocumentTarget(tabId, sender.documentId);
           const key = documentKey(tabId, sender.documentId);
+          frozenCaptureById.delete(message.captureId);
           if (isCurrentCapture(target, message.captureId)) {
             captureByDocument.delete(key);
           }
