@@ -9,8 +9,16 @@ interface CropMocks {
   canvases: Array<{ width: number; height: number }>;
 }
 
-function installCropMocks(options: { context?: boolean; convertError?: Error } = {}): CropMocks {
-  const bitmap = { width: 200, height: 200, close: vi.fn() };
+function installCropMocks(options: {
+  bitmapSize?: { width: number; height: number };
+  context?: boolean;
+  convertError?: Error;
+} = {}): CropMocks {
+  const bitmap = {
+    width: options.bitmapSize?.width ?? 200,
+    height: options.bitmapSize?.height ?? 200,
+    close: vi.fn(),
+  };
   const drawImage = vi.fn();
   const convertToBlob = options.convertError
     ? vi.fn(async () => Promise.reject(options.convertError))
@@ -73,8 +81,7 @@ describe('cropImage', () => {
 
     const result = await cropImage(
       'data:image/png;base64,U09VUkNF',
-      { x: -5, y: 95, width: 20, height: 20 },
-      2,
+      { x: 0, y: 0.95, width: 0.15, height: 0.05 },
     );
 
     expect(result).toBe('data:image/png;base64,Q1JPUEVERA==');
@@ -93,17 +100,39 @@ describe('cropImage', () => {
     expect(mocks.bitmap.close).toHaveBeenCalledOnce();
   });
 
-  it('rejects crops outside the image and still closes the bitmap', async () => {
+  it('rounds normalized bounds against the decoded bitmap dimensions', async () => {
     const mocks = installCropMocks();
 
-    await expect(
-      cropImage(
-        'data:image/png;base64,U09VUkNF',
-        { x: 101, y: 10, width: 20, height: 20 },
-        2,
-      ),
-    ).rejects.toThrow('does not intersect');
+    await expect(cropImage(
+      'data:image/png;base64,U09VUkNF',
+      { x: 0.505, y: 0.05, width: 0.1, height: 0.1 },
+    )).resolves.toBe('data:image/png;base64,Q1JPUEVERA==');
+    expect(mocks.canvases).toEqual([{ width: 20, height: 20 }]);
     expect(mocks.bitmap.close).toHaveBeenCalledOnce();
+  });
+
+  it('maps the same normalized region using decoded pixels, independent of page DPR', async () => {
+    const mocks = installCropMocks({
+      bitmapSize: { width: 1_600, height: 900 },
+    });
+
+    await cropImage(
+      'data:image/png;base64,U09VUkNF',
+      { x: 0.125, y: 0.2, width: 0.5, height: 0.4 },
+    );
+
+    expect(mocks.canvases).toEqual([{ width: 800, height: 360 }]);
+    expect(mocks.drawImage).toHaveBeenCalledWith(
+      mocks.bitmap,
+      200,
+      180,
+      800,
+      360,
+      0,
+      0,
+      800,
+      360,
+    );
   });
 
   it('closes the bitmap when canvas setup fails', async () => {
@@ -112,8 +141,7 @@ describe('cropImage', () => {
     await expect(
       cropImage(
         'data:image/png;base64,U09VUkNF',
-        { x: 10, y: 10, width: 20, height: 20 },
-        2,
+        { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
       ),
     ).rejects.toThrow('Failed to get canvas context');
     expect(mocks.bitmap.close).toHaveBeenCalledOnce();
@@ -125,8 +153,7 @@ describe('cropImage', () => {
     await expect(
       cropImage(
         'data:image/png;base64,U09VUkNF',
-        { x: 10, y: 10, width: 20, height: 20 },
-        2,
+        { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
       ),
     ).rejects.toThrow('conversion failed');
     expect(mocks.bitmap.close).toHaveBeenCalledOnce();
@@ -138,10 +165,19 @@ describe('cropImage', () => {
     await expect(
       cropImage(
         'data:image/png;base64,U09VUkNF',
-        { x: 0, y: 0, width: 0, height: 20 },
-        2,
+        { x: 0, y: 0, width: 0, height: 0.2 },
       ),
     ).rejects.toBeInstanceOf(RangeError);
+    expect(mocks.createImageBitmap).not.toHaveBeenCalled();
+  });
+
+  it('rejects normalized rectangles that extend beyond the image', async () => {
+    const mocks = installCropMocks();
+
+    await expect(cropImage(
+      'data:image/png;base64,U09VUkNF',
+      { x: 0.9, y: 0.1, width: 0.2, height: 0.2 },
+    )).rejects.toBeInstanceOf(RangeError);
     expect(mocks.createImageBitmap).not.toHaveBeenCalled();
   });
 });

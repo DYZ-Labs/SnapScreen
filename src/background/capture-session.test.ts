@@ -9,8 +9,7 @@ import {
 const input = {
   tabId: 7,
   windowId: 2,
-  rect: { x: 1, y: 2, width: 30, height: 40 },
-  devicePixelRatio: 2,
+  normalizedRect: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
   isCurrent: () => true,
 };
 
@@ -34,8 +33,7 @@ describe('captureInitiatingTab', () => {
     expect(deps.captureVisibleTab).toHaveBeenCalledWith(2);
     expect(deps.cropImage).toHaveBeenCalledWith(
       'data:image/png;base64,FULL',
-      input.rect,
-      2,
+      input.normalizedRect,
     );
   });
 

@@ -18,36 +18,75 @@ import {
   type UiAttestationResponse,
 } from '../lib/ui-protocol';
 import {
+  WORKSPACE_PATH,
+  WORKSPACE_PORT_NAME,
+  isWorkspaceToBackgroundMessage,
+  type WorkspaceError,
+  type WorkspaceInitialMessage,
+} from '../lib/workspace-protocol';
+import {
   ActiveTabChangedError,
   CaptureSupersededError,
   captureInitiatingViewport,
 } from './capture-session';
 import { GenerationRegistry, type ActiveGeneration } from './generation-registry';
-import {
-  getDocumentMessageOptions,
-  type DocumentTarget,
-} from './document-target';
+import { getDocumentMessageOptions, type DocumentTarget } from './document-target';
 import { UiCapabilityRegistry } from './ui-capability-registry';
-
-const RESTRICTED_PREFIXES = [
-  'https://chrome.google.com/webstore',
-  'https://chromewebstore.google.com/',
-];
 
 const generations = new GenerationRegistry();
 const uiCapabilities = new UiCapabilityRegistry();
 
-interface CaptureRecord extends DocumentTarget {
+interface ContentEndpoint extends DocumentTarget {
+  kind: 'content';
+}
+
+interface WorkspaceEndpoint {
+  kind: 'workspace';
+  sessionId: string;
+  tabId: number;
+}
+
+type SessionEndpoint = ContentEndpoint | WorkspaceEndpoint;
+
+interface CaptureRecord {
   captureId: string;
+  endpointKey: string;
 }
 
 interface FrozenCapture {
   dataUrl: string;
-  tabId: number;
+  endpointKey: string;
 }
 
-const captureByDocument = new Map<string, CaptureRecord>();
+interface WorkspaceMetadata {
+  claimed: boolean;
+  initialNonce?: string;
+  reconnectToken?: string;
+  sessionId: string;
+  sourceDocumentVersion: number;
+  sourceRecaptureAvailable: boolean;
+  sourceTabId: number;
+  sourceUrl?: string;
+  sourceWindowId: number;
+  workspaceTabId: number;
+}
+
+interface WorkspaceRecord extends WorkspaceMetadata {
+  acceptingInitialStart?: boolean;
+  awaitingInitialClaim?: boolean;
+  claimTimer?: ReturnType<typeof setTimeout>;
+  disconnectTimer?: ReturnType<typeof setTimeout>;
+  pendingError?: WorkspaceError;
+  pendingStart?: WorkspaceInitialMessage;
+  port?: chrome.runtime.Port;
+  requestIds?: Set<string>;
+}
+
+const captureByEndpoint = new Map<string, CaptureRecord>();
 const frozenCaptureById = new Map<string, FrozenCapture>();
+const workspaceBySession = new Map<string, WorkspaceRecord>();
+const workspaceSessionBySourceTab = new Map<number, string>();
+const workspaceSessionByTab = new Map<number, string>();
 const activationVersionByWindow = new Map<number, number>();
 const badgeClearTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const actionFeedbackVersionByTab = new Map<number, number>();
@@ -59,6 +98,9 @@ const GENERIC_GENERATION_ERROR =
   'SnapScreen could not complete this request. Please try again.';
 const DEFAULT_ACTION_TITLE = 'SnapScreen – Snip and analyze';
 const SNIP_START_TIMEOUT_MS = 5_000;
+const WORKSPACE_CLAIM_TIMEOUT_MS = 30_000;
+const WORKSPACE_DISCONNECT_TIMEOUT_MS = 5_000;
+const WORKSPACE_STORAGE_PREFIX = 'snapscreenWorkspace:';
 const documentVersionByTab = new Map<number, number>();
 
 void initializeStorageAccess();
@@ -81,19 +123,27 @@ function getPublicGenerationError(err: unknown): { code: string; message: string
   return { code: 'unknown', message: GENERIC_GENERATION_ERROR };
 }
 
-function documentKey(tabId: number, documentId?: string): string {
-  return `${tabId}:${documentId ?? 'unknown'}`;
+function endpointKey(endpoint: SessionEndpoint): string {
+  return endpoint.kind === 'content'
+    ? `content:${endpoint.tabId}:${endpoint.documentId ?? 'unknown'}`
+    : `workspace:${endpoint.tabId}:${endpoint.sessionId}`;
 }
 
-function beginCapture(target: DocumentTarget, captureId: string): boolean {
-  const key = documentKey(target.tabId, target.documentId);
-  if (captureByDocument.get(key)?.captureId === captureId) return false;
-  captureByDocument.set(key, { ...target, captureId });
+function endpointDocumentId(endpoint: SessionEndpoint): string | undefined {
+  return endpoint.kind === 'content'
+    ? endpoint.documentId
+    : `workspace:${endpoint.sessionId}`;
+}
+
+function beginCapture(endpoint: SessionEndpoint, captureId: string): boolean {
+  const key = endpointKey(endpoint);
+  if (captureByEndpoint.get(key)?.captureId === captureId) return false;
+  captureByEndpoint.set(key, { endpointKey: key, captureId });
   return true;
 }
 
-function isCurrentCapture(target: DocumentTarget, captureId: string): boolean {
-  return captureByDocument.get(documentKey(target.tabId, target.documentId))?.captureId === captureId;
+function isCurrentCapture(endpoint: SessionEndpoint, captureId: string): boolean {
+  return captureByEndpoint.get(endpointKey(endpoint))?.captureId === captureId;
 }
 
 function clearTabState(tabId: number): void {
@@ -108,11 +158,18 @@ function clearTabState(tabId: number): void {
   if (hadActionFeedback || badgeTimer !== undefined) {
     void clearActionFeedback(tabId);
   }
-  for (const [key, capture] of captureByDocument) {
-    if (capture.tabId === tabId) captureByDocument.delete(key);
+  for (const [key] of captureByEndpoint) {
+    if (key.startsWith(`content:${tabId}:`) || key.startsWith(`workspace:${tabId}:`)) {
+      captureByEndpoint.delete(key);
+    }
   }
   for (const [captureId, capture] of frozenCaptureById) {
-    if (capture.tabId === tabId) frozenCaptureById.delete(captureId);
+    if (
+      capture.endpointKey.startsWith(`content:${tabId}:`)
+      || capture.endpointKey.startsWith(`workspace:${tabId}:`)
+    ) {
+      frozenCaptureById.delete(captureId);
+    }
   }
 }
 
@@ -136,13 +193,46 @@ function isTrustedTopFrameContentSender(
   sender: chrome.runtime.MessageSender,
 ): boolean {
   const url = getSenderUrl(sender);
+  const originMatches = url?.protocol === 'file:'
+    ? sender.origin === 'file://' || sender.origin === 'null'
+    : !!url && sender.origin === url.origin;
   return sender.id === chrome.runtime.id
     && sender.frameId === 0
     && !!sender.tab
     && typeof sender.tab.id === 'number'
     && !!url
-    && (url.protocol === 'http:' || url.protocol === 'https:')
-    && sender.origin === url.origin;
+    && (
+      url.protocol === 'http:'
+      || url.protocol === 'https:'
+      || url.protocol === 'file:'
+    )
+    && originMatches;
+}
+
+function isTrustedWorkspaceSender(sender: chrome.runtime.MessageSender): boolean {
+  const url = getSenderUrl(sender);
+  const extensionOrigin = `chrome-extension://${chrome.runtime.id}`;
+  return sender.id === chrome.runtime.id
+    && sender.frameId === 0
+    && !!sender.tab
+    && typeof sender.tab.id === 'number'
+    && !!url
+    && url.protocol === 'chrome-extension:'
+    && url.host === chrome.runtime.id
+    && url.pathname === `/${WORKSPACE_PATH}`
+    && sender.origin === extensionOrigin;
+}
+
+function isWorkspaceUrl(value?: string): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'chrome-extension:'
+      && url.host === chrome.runtime.id
+      && url.pathname === `/${WORKSPACE_PATH}`;
+  } catch {
+    return false;
+  }
 }
 
 function isTrustedUiFrameSender(sender: chrome.runtime.MessageSender): boolean {
@@ -195,11 +285,11 @@ function handleUiAttestation(
   return ok ? { ok: true } : { ok: false, error: 'ui_auth_failed' };
 }
 
-function getDocumentTarget(
+function getContentEndpoint(
   tabId: number,
   documentId: string | undefined,
-): DocumentTarget {
-  return { tabId, documentId };
+): ContentEndpoint {
+  return { kind: 'content', tabId, documentId };
 }
 
 function getRequestSessionSettings(
@@ -212,23 +302,40 @@ function getRequestSessionSettings(
   };
 }
 
-function sendToDocument(
-  target: DocumentTarget,
+function sendToEndpoint(
+  endpoint: SessionEndpoint,
   message: BgToCsMessage,
 ): Promise<unknown> {
-  return chrome.tabs.sendMessage(
-    target.tabId,
-    message,
-    getDocumentMessageOptions(target),
-  );
+  if (endpoint.kind === 'content') {
+    return chrome.tabs.sendMessage(
+      endpoint.tabId,
+      message,
+      getDocumentMessageOptions(endpoint),
+    );
+  }
+
+  const record = workspaceBySession.get(endpoint.sessionId);
+  if (!record?.port || record.workspaceTabId !== endpoint.tabId) {
+    return Promise.reject(new Error('The SnapScreen workspace is disconnected.'));
+  }
+  try {
+    record.port.postMessage({
+      type: 'SNAPSCREEN_WORKSPACE_EVENT',
+      sessionId: endpoint.sessionId,
+      message,
+    });
+    return Promise.resolve();
+  } catch (error) {
+    return Promise.reject(error);
+  }
 }
 
-async function safeSendToDocument(
-  target: DocumentTarget,
+async function safeSendToEndpoint(
+  endpoint: SessionEndpoint,
   message: BgToCsMessage,
 ): Promise<boolean> {
   try {
-    await sendToDocument(target, message);
+    await sendToEndpoint(endpoint, message);
     return true;
   } catch {
     return false;
@@ -236,29 +343,17 @@ async function safeSendToDocument(
 }
 
 function makeDeltaRelay(
-  target: DocumentTarget,
+  endpoint: SessionEndpoint,
   ids: { captureId: string; requestId: string; screenshotId: string },
   generation: ActiveGeneration,
 ): (textSoFar: string) => void {
   return (textSoFar) => {
-    if (!generations.isCurrent(target.tabId, ids.requestId)) return;
-    sendToDocument(target, { type: 'ANALYZE_CHUNK', text: textSoFar, ...ids })
+    if (!generations.isCurrent(endpoint.tabId, ids.requestId)) return;
+    sendToEndpoint(endpoint, { type: 'ANALYZE_CHUNK', text: textSoFar, ...ids })
       .catch(() => {
-        // If the original document is gone, stop spending tokens immediately.
-        generations.cancel(target.tabId, generation.requestId);
+        generations.cancel(endpoint.tabId, generation.requestId);
       });
   };
-}
-
-function isRestrictedUrl(url?: string): boolean {
-  if (!url) return true;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
-  } catch {
-    return true;
-  }
-  return RESTRICTED_PREFIXES.some((prefix) => url.startsWith(prefix));
 }
 
 async function showActionBadge(tabId: number, message: string): Promise<void> {
@@ -320,24 +415,375 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
+function createCapabilityNonce(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '');
+}
+
+function workspaceStorageKey(sessionId: string): string {
+  return `${WORKSPACE_STORAGE_PREFIX}${sessionId}`;
+}
+
+function getWorkspaceMetadata(record: WorkspaceRecord): WorkspaceMetadata {
+  return {
+    claimed: record.claimed,
+    initialNonce: record.initialNonce,
+    reconnectToken: record.reconnectToken,
+    sessionId: record.sessionId,
+    sourceDocumentVersion: record.sourceDocumentVersion,
+    sourceRecaptureAvailable: record.sourceRecaptureAvailable,
+    sourceTabId: record.sourceTabId,
+    sourceUrl: record.sourceUrl,
+    sourceWindowId: record.sourceWindowId,
+    workspaceTabId: record.workspaceTabId,
+  };
+}
+
+async function persistWorkspace(record: WorkspaceRecord): Promise<void> {
+  const storage = chrome.storage?.session;
+  if (!storage) return;
+  try {
+    await storage.set({
+      [workspaceStorageKey(record.sessionId)]: getWorkspaceMetadata(record),
+    });
+  } catch {
+    // The live registry remains authoritative while this worker is running.
+  }
+}
+
+function isWorkspaceMetadata(value: unknown): value is WorkspaceMetadata {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const metadata = value as Partial<WorkspaceMetadata>;
+  const hasInitialCredential = metadata.claimed === false
+    && typeof metadata.initialNonce === 'string'
+    && /^[A-Za-z0-9_-]{43}$/u.test(metadata.initialNonce)
+    && metadata.reconnectToken === undefined;
+  const hasReconnectCredential = metadata.claimed === true
+    && metadata.initialNonce === undefined
+    && typeof metadata.reconnectToken === 'string'
+    && /^[A-Za-z0-9_-]{43}$/u.test(metadata.reconnectToken);
+  return (hasInitialCredential || hasReconnectCredential)
+    && typeof metadata.sessionId === 'string'
+    && typeof metadata.sourceDocumentVersion === 'number'
+    && typeof metadata.sourceRecaptureAvailable === 'boolean'
+    && typeof metadata.sourceTabId === 'number'
+    && (metadata.sourceUrl === undefined || typeof metadata.sourceUrl === 'string')
+    && typeof metadata.sourceWindowId === 'number'
+    && typeof metadata.workspaceTabId === 'number';
+}
+
+async function restoreWorkspace(sessionId: string): Promise<WorkspaceRecord | null> {
+  const storage = chrome.storage?.session;
+  if (!storage) return null;
+  try {
+    const key = workspaceStorageKey(sessionId);
+    const stored = await storage.get(key);
+    const metadata = stored[key];
+    if (!isWorkspaceMetadata(metadata) || metadata.sessionId !== sessionId) return null;
+    const record: WorkspaceRecord = { ...metadata };
+    workspaceBySession.set(sessionId, record);
+    workspaceSessionBySourceTab.set(record.sourceTabId, sessionId);
+    workspaceSessionByTab.set(record.workspaceTabId, sessionId);
+    if (!record.claimed) armWorkspaceClaimTimeout(record);
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+async function removeWorkspaceMetadata(sessionId: string): Promise<void> {
+  const storage = chrome.storage?.session;
+  if (!storage) return;
+  try {
+    await storage.remove(workspaceStorageKey(sessionId));
+  } catch {
+    // Cleanup is best effort for an already-closed workspace.
+  }
+}
+
+function getWorkspaceEndpoint(record: WorkspaceRecord): WorkspaceEndpoint {
+  return {
+    kind: 'workspace',
+    sessionId: record.sessionId,
+    tabId: record.workspaceTabId,
+  };
+}
+
+function cleanupWorkspace(sessionId: string): void {
+  const record = workspaceBySession.get(sessionId);
+  if (!record) {
+    void removeWorkspaceMetadata(sessionId);
+    return;
+  }
+  if (record.claimTimer !== undefined) clearTimeout(record.claimTimer);
+  if (record.disconnectTimer !== undefined) clearTimeout(record.disconnectTimer);
+  workspaceBySession.delete(sessionId);
+  if (workspaceSessionBySourceTab.get(record.sourceTabId) === sessionId) {
+    workspaceSessionBySourceTab.delete(record.sourceTabId);
+  }
+  if (workspaceSessionByTab.get(record.workspaceTabId) === sessionId) {
+    workspaceSessionByTab.delete(record.workspaceTabId);
+  }
+  record.port = undefined;
+  clearTabState(record.workspaceTabId);
+  void removeWorkspaceMetadata(sessionId);
+}
+
+function armWorkspaceClaimTimeout(record: WorkspaceRecord): void {
+  if (record.claimTimer !== undefined) clearTimeout(record.claimTimer);
+  record.claimTimer = setTimeout(() => {
+    if (record.claimed || workspaceBySession.get(record.sessionId) !== record) return;
+    record.claimTimer = undefined;
+    const shouldReportExpiredCapture = record.acceptingInitialStart
+      || record.pendingStart !== undefined;
+    record.acceptingInitialStart = false;
+    record.awaitingInitialClaim = false;
+    record.pendingStart = undefined;
+    if (shouldReportExpiredCapture) {
+      record.pendingError = {
+        code: 'capture_expired',
+        message: 'The frozen screenshot expired before the workspace opened. Return to the source tab and try again.',
+      };
+    }
+  }, WORKSPACE_CLAIM_TIMEOUT_MS);
+}
+
+async function closeWorkspace(record: WorkspaceRecord): Promise<void> {
+  cleanupWorkspace(record.sessionId);
+  await chrome.tabs.update(record.sourceTabId, { active: true }).catch(() => undefined);
+  await chrome.tabs.remove(record.workspaceTabId).catch(() => undefined);
+}
+
+async function getReusableWorkspace(sourceTabId: number): Promise<WorkspaceRecord | null> {
+  const sessionId = workspaceSessionBySourceTab.get(sourceTabId);
+  if (!sessionId) return null;
+  const record = workspaceBySession.get(sessionId);
+  if (!record) return null;
+  try {
+    const workspaceTab = await chrome.tabs.get(record.workspaceTabId);
+    if (!isWorkspaceUrl(workspaceTab.url)) {
+      cleanupWorkspace(sessionId);
+      return null;
+    }
+    return record;
+  } catch {
+    cleanupWorkspace(sessionId);
+    return null;
+  }
+}
+
+async function createWorkspace(
+  source: {
+    documentVersion: number;
+    tabId: number;
+    url?: string;
+    windowId: number;
+  },
+): Promise<WorkspaceRecord> {
+  const sessionId = crypto.randomUUID();
+  const nonce = createCapabilityNonce();
+  const url = new URL(chrome.runtime.getURL(WORKSPACE_PATH));
+  url.hash = new URLSearchParams({ session: sessionId, nonce }).toString();
+  const workspaceTab = await chrome.tabs.create({
+    active: true,
+    url: url.href,
+    windowId: source.windowId,
+  });
+  if (typeof workspaceTab.id !== 'number') {
+    throw new Error('Chrome did not create the SnapScreen workspace tab.');
+  }
+
+  const record: WorkspaceRecord = {
+    acceptingInitialStart: true,
+    claimed: false,
+    initialNonce: nonce,
+    sessionId,
+    sourceDocumentVersion: source.documentVersion,
+    sourceRecaptureAvailable: true,
+    sourceTabId: source.tabId,
+    sourceUrl: source.url,
+    sourceWindowId: source.windowId,
+    workspaceTabId: workspaceTab.id,
+  };
+  workspaceBySession.set(sessionId, record);
+  workspaceSessionBySourceTab.set(source.tabId, sessionId);
+  workspaceSessionByTab.set(workspaceTab.id, sessionId);
+  armWorkspaceClaimTimeout(record);
+  await persistWorkspace(record);
+  return record;
+}
+
+async function getOrCreateWorkspace(
+  source: {
+    documentVersion: number;
+    tabId: number;
+    url?: string;
+    windowId: number;
+  },
+): Promise<WorkspaceRecord> {
+  const existing = await getReusableWorkspace(source.tabId);
+  if (existing) {
+    existing.sourceDocumentVersion = source.documentVersion;
+    existing.sourceRecaptureAvailable = true;
+    existing.sourceUrl = source.url;
+    existing.sourceWindowId = source.windowId;
+    await persistWorkspace(existing);
+    await chrome.tabs.update(existing.workspaceTabId, { active: true });
+    return existing;
+  }
+  return createWorkspace(source);
+}
+
+function postWorkspaceReady(record: WorkspaceRecord): void {
+  const port = record.port;
+  const reconnectToken = record.reconnectToken;
+  if (!port || !reconnectToken) return;
+  const initialMessage = record.pendingStart;
+  const error = record.pendingError;
+  record.pendingStart = undefined;
+  record.pendingError = undefined;
+  port.postMessage({
+    type: 'SNAPSCREEN_WORKSPACE_READY',
+    sessionId: record.sessionId,
+    reconnectToken,
+    initialMessage,
+    error,
+  });
+}
+
+async function deliverWorkspaceStart(
+  record: WorkspaceRecord,
+  startMessage: WorkspaceInitialMessage,
+): Promise<void> {
+  const endpoint = getWorkspaceEndpoint(record);
+  record.pendingStart = startMessage;
+  record.pendingError = undefined;
+  record.acceptingInitialStart = false;
+
+  if (record.port) {
+    if (record.awaitingInitialClaim) {
+      record.awaitingInitialClaim = false;
+      postWorkspaceReady(record);
+    } else {
+      record.pendingStart = undefined;
+      await sendToEndpoint(endpoint, startMessage);
+    }
+  }
+}
+
+async function openWorkspaceError(
+  source: {
+    documentVersion: number;
+    tabId: number;
+    url?: string;
+    windowId: number;
+  },
+  error: WorkspaceError,
+): Promise<void> {
+  const record = await getOrCreateWorkspace(source);
+  record.pendingError = error;
+  record.pendingStart = undefined;
+  record.acceptingInitialStart = false;
+  if (record.port) {
+    record.awaitingInitialClaim = false;
+    postWorkspaceReady(record);
+  }
+}
+
+async function prepareExistingUi(tabId: number): Promise<void> {
+  try {
+    await withTimeout(
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: 'PREPARE_SNIP_CAPTURE' } satisfies BgToCsMessage,
+        { frameId: 0 },
+      ),
+      SNIP_START_TIMEOUT_MS,
+    );
+  } catch {
+    // A missing receiver is expected on cold and browser-restricted tabs.
+  }
+}
+
+async function injectContentEndpoint(
+  tabId: number,
+  expectedDocumentVersion: number,
+): Promise<ContentEndpoint | null> {
+  try {
+    const injectionResults = await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId },
+        files: [contentScript],
+      }),
+      SNIP_START_TIMEOUT_MS,
+    );
+    if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) return null;
+    const topFrameResult = injectionResults.find((result) => result.frameId === 0);
+    return topFrameResult?.documentId
+      ? getContentEndpoint(tabId, topFrameResult.documentId)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureVisibleViewport(
+  tabId: number,
+  windowId: number,
+  expectedDocumentVersion: number,
+): Promise<string> {
+  return captureInitiatingViewport(
+    {
+      getActiveTab: async (targetWindowId) => {
+        const [activeTab] = await chrome.tabs.query({
+          active: true,
+          windowId: targetWindowId,
+        });
+        return activeTab ?? null;
+      },
+      getActivationVersion: (targetWindowId) =>
+        activationVersionByWindow.get(targetWindowId) ?? 0,
+      captureVisibleTab: (targetWindowId) =>
+        chrome.tabs.captureVisibleTab(targetWindowId, { format: 'png' }),
+    },
+    {
+      tabId,
+      windowId,
+      isCurrent: () =>
+        (documentVersionByTab.get(tabId) ?? 0) === expectedDocumentVersion,
+    },
+  );
+}
+
+async function ensureFileAccess(url?: string): Promise<boolean> {
+  if (!url?.startsWith('file:')) return true;
+  try {
+    const granted = await chrome.permissions.request({ origins: ['file:///*'] });
+    if (!granted) return false;
+    return await chrome.extension.isAllowedFileSchemeAccess();
+  } catch {
+    return false;
+  }
+}
+
 async function startSnip(
   tabId: number,
   windowId: number,
   expectedDocumentVersion: number,
   requestedSettings?: SnapScreenSessionSettings,
+  sourceUrl?: string,
 ): Promise<void> {
+  await prepareExistingUi(tabId);
+  let dataUrl: string;
   try {
-    const [storedSettings, injectionResults] = await Promise.all([
-      getSettings(),
-      withTimeout(
-        chrome.scripting.executeScript({
-          target: { tabId },
-          files: [contentScript],
-        }),
-        SNIP_START_TIMEOUT_MS,
-      ),
-    ]);
-
+    dataUrl = await captureVisibleViewport(tabId, windowId, expectedDocumentVersion);
+  } catch (error) {
     if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) {
       await showActionBadge(
         tabId,
@@ -345,58 +791,52 @@ async function startSnip(
       );
       return;
     }
-
-    const topFrameResult = injectionResults.find((result) => result.frameId === 0);
-    if (!topFrameResult?.documentId) {
-      throw new Error('SnapScreen could not identify the injected page document.');
-    }
-
-    const target = { tabId, documentId: topFrameResult.documentId };
-    await withTimeout(
-      sendToDocument(target, { type: 'PREPARE_SNIP_CAPTURE' }),
-      SNIP_START_TIMEOUT_MS,
+    await showPageToast(
+      tabId,
+      error instanceof ActiveTabChangedError
+        ? error.message
+        : 'Chrome did not allow SnapScreen to capture this tab. Browser UI, protected media, and system-secured surfaces may be unavailable.',
     );
+    return;
+  }
 
-    const dataUrl = await captureInitiatingViewport(
-      {
-        getActiveTab: async (targetWindowId) => {
-          const [activeTab] = await chrome.tabs.query({
-            active: true,
-            windowId: targetWindowId,
-          });
-          return activeTab ?? null;
-        },
-        getActivationVersion: (targetWindowId) =>
-          activationVersionByWindow.get(targetWindowId) ?? 0,
-        captureVisibleTab: (targetWindowId) =>
-          chrome.tabs.captureVisibleTab(targetWindowId, { format: 'png' }),
-      },
-      {
-        tabId,
-        windowId,
-        isCurrent: () =>
-          (documentVersionByTab.get(tabId) ?? 0) === expectedDocumentVersion,
-      },
-    );
+  try {
+    const storedSettings = await getSettings();
     const settings = getRequestSessionSettings(requestedSettings, storedSettings);
     const captureId = crypto.randomUUID();
-    frozenCaptureById.set(captureId, { dataUrl, tabId });
-    try {
-      await sendToDocument(
-        target,
-        {
-          type: 'START_SNIP',
-          captureId,
-          dataUrl,
-          hasApiKey: Boolean(storedSettings.apiKey),
-          defaultPrompt: settings.defaultPrompt,
-          limits: settings.limits,
-        },
-      );
-    } catch (error) {
-      frozenCaptureById.delete(captureId);
-      throw error;
+    const startMessage: WorkspaceInitialMessage = {
+      type: 'START_SNIP',
+      captureId,
+      dataUrl,
+      hasApiKey: Boolean(storedSettings.apiKey),
+      defaultPrompt: settings.defaultPrompt,
+      limits: settings.limits,
+    };
+
+    const contentEndpoint = await injectContentEndpoint(tabId, expectedDocumentVersion);
+    if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) {
+      throw new ActiveTabChangedError();
     }
+    if (contentEndpoint) {
+      frozenCaptureById.set(captureId, {
+        dataUrl,
+        endpointKey: endpointKey(contentEndpoint),
+      });
+      try {
+        await sendToEndpoint(contentEndpoint, startMessage);
+        return;
+      } catch {
+        frozenCaptureById.delete(captureId);
+      }
+    }
+
+    const workspace = await getOrCreateWorkspace({
+      documentVersion: expectedDocumentVersion,
+      tabId,
+      url: sourceUrl,
+      windowId,
+    });
+    await deliverWorkspaceStart(workspace, startMessage);
   } catch {
     if ((documentVersionByTab.get(tabId) ?? 0) !== expectedDocumentVersion) {
       await showActionBadge(
@@ -419,21 +859,343 @@ async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
 
 async function handleStartSnip(tab?: chrome.tabs.Tab): Promise<void> {
   const resolved = tab ?? (await getActiveTab());
-  if (!resolved?.id) return;
+  if (typeof resolved?.id !== 'number') return;
 
-  if (isRestrictedUrl(resolved.url)) {
-    await showPageToast(
-      resolved.id,
-      'Cannot capture this page. SnapScreen supports regular HTTP and HTTPS pages only.',
-    );
+  const expectedDocumentVersion = documentVersionByTab.get(resolved.id) ?? 0;
+  if (!(await ensureFileAccess(resolved.url))) {
+    await openWorkspaceError(
+      {
+        documentVersion: expectedDocumentVersion,
+        tabId: resolved.id,
+        url: resolved.url,
+        windowId: resolved.windowId,
+      },
+      {
+        code: 'file_access_disabled',
+        message: 'Chrome has not granted SnapScreen access to local files. Enable “Allow access to file URLs” in Manage Extension, then try again.',
+      },
+    ).catch(() => showActionBadge(
+      resolved.id!,
+      'Enable “Allow access to file URLs” for SnapScreen, then try again.',
+    ));
     return;
   }
 
   await startSnip(
     resolved.id,
     resolved.windowId,
-    documentVersionByTab.get(resolved.id) ?? 0,
+    expectedDocumentVersion,
+    undefined,
+    resolved.url,
   );
+}
+
+function getUrlOrigin(url?: string): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+async function recaptureWorkspace(
+  record: WorkspaceRecord,
+  requestedSettings: SnapScreenSessionSettings,
+): Promise<{ ok: true } | { error: string }> {
+  const pageChangedMessage =
+    'The source page changed. Return to it and invoke SnapScreen again to grant access.';
+  if (!record.sourceRecaptureAvailable) {
+    await safeSendToEndpoint(getWorkspaceEndpoint(record), {
+      type: 'RESNIP_UNAVAILABLE',
+      message: pageChangedMessage,
+    });
+    return { error: pageChangedMessage };
+  }
+  let sourceTab: chrome.tabs.Tab;
+  try {
+    sourceTab = await chrome.tabs.get(record.sourceTabId);
+  } catch {
+    const message = 'The source tab was closed. Follow-up questions still work, but a new snip is unavailable.';
+    await safeSendToEndpoint(getWorkspaceEndpoint(record), {
+      type: 'RESNIP_UNAVAILABLE',
+      message,
+    });
+    return { error: message };
+  }
+
+  const currentVersion = documentVersionByTab.get(record.sourceTabId) ?? 0;
+  const storedOrigin = getUrlOrigin(record.sourceUrl);
+  const currentOrigin = getUrlOrigin(sourceTab.url);
+  if (
+    currentVersion !== record.sourceDocumentVersion
+    || (storedOrigin !== null && currentOrigin !== null && storedOrigin !== currentOrigin)
+  ) {
+    record.sourceRecaptureAvailable = false;
+    await persistWorkspace(record);
+    await safeSendToEndpoint(getWorkspaceEndpoint(record), {
+      type: 'RESNIP_UNAVAILABLE',
+      message: pageChangedMessage,
+    });
+    return { error: pageChangedMessage };
+  }
+
+  try {
+    await chrome.tabs.update(record.sourceTabId, { active: true });
+    await prepareExistingUi(record.sourceTabId);
+    const dataUrl = await captureVisibleViewport(
+      record.sourceTabId,
+      record.sourceWindowId,
+      currentVersion,
+    );
+    const storedSettings = await getSettings();
+    const settings = getRequestSessionSettings(requestedSettings, storedSettings);
+    const startMessage: WorkspaceInitialMessage = {
+      type: 'START_SNIP',
+      captureId: crypto.randomUUID(),
+      dataUrl,
+      hasApiKey: Boolean(storedSettings.apiKey),
+      defaultPrompt: settings.defaultPrompt,
+      limits: settings.limits,
+    };
+
+    record.sourceDocumentVersion = currentVersion;
+    record.sourceUrl = sourceTab.url;
+    await persistWorkspace(record);
+    await chrome.tabs.update(record.workspaceTabId, { active: true });
+    await deliverWorkspaceStart(record, startMessage);
+    return { ok: true };
+  } catch {
+    await chrome.tabs.update(record.workspaceTabId, { active: true }).catch(() => undefined);
+    record.sourceRecaptureAvailable = false;
+    await persistWorkspace(record);
+    await safeSendToEndpoint(getWorkspaceEndpoint(record), {
+      type: 'RESNIP_UNAVAILABLE',
+      message: pageChangedMessage,
+    });
+    return { error: pageChangedMessage };
+  }
+}
+
+async function handleControllerMessage(
+  message: CsToBgMessage,
+  endpoint: SessionEndpoint,
+  senderTab?: chrome.tabs.Tab,
+): Promise<unknown> {
+  const ownerTabId = endpoint.tabId;
+  try {
+    switch (message.type) {
+      case 'REQUEST_SNIP': {
+        if (endpoint.kind === 'workspace') {
+          const workspace = workspaceBySession.get(endpoint.sessionId);
+          if (!workspace) return { error: 'The SnapScreen workspace expired.' };
+          return recaptureWorkspace(workspace, message.sessionSettings);
+        }
+
+        if (senderTab?.windowId === undefined) return { error: 'No tab context' };
+        await startSnip(
+          ownerTabId,
+          senderTab.windowId,
+          documentVersionByTab.get(ownerTabId) ?? 0,
+          message.sessionSettings,
+          senderTab.url,
+        );
+        return { ok: true };
+      }
+
+      case 'CAPTURE_REGION': {
+        if (!beginCapture(endpoint, message.captureId)) {
+          return { ok: false, duplicate: true };
+        }
+
+        try {
+          const frozenCapture = frozenCaptureById.get(message.captureId);
+          frozenCaptureById.delete(message.captureId);
+          const currentEndpointKey = endpointKey(endpoint);
+          const cropped = await cropImage(
+            frozenCapture?.endpointKey === currentEndpointKey
+              ? frozenCapture.dataUrl
+              : message.dataUrl,
+            message.selection.normalizedRect,
+          );
+
+          if (!isCurrentCapture(endpoint, message.captureId)) {
+            return { ok: false, stale: true };
+          }
+
+          await sendToEndpoint(endpoint, {
+            type: 'CROPPED_IMAGE',
+            dataUrl: cropped,
+            captureId: message.captureId,
+          });
+          return { ok: true };
+        } catch (error) {
+          if (error instanceof CaptureSupersededError) {
+            return { ok: false, stale: true };
+          }
+
+          const failure = getPublicCaptureError(error);
+          await safeSendToEndpoint(endpoint, {
+            type: 'CAPTURE_ERROR',
+            code: failure.code,
+            message: failure.message,
+            captureId: message.captureId,
+          });
+          return { error: failure.message };
+        }
+      }
+
+      case 'ANALYZE': {
+        const generation = generations.start(
+          ownerTabId,
+          endpointDocumentId(endpoint),
+          message.captureId,
+          message.requestId,
+        );
+        if (!generation) return { ok: false, duplicate: true };
+        const ids = {
+          captureId: message.captureId,
+          requestId: message.requestId,
+          screenshotId: message.screenshotId,
+        };
+
+        try {
+          const settings = await getSettings();
+          if (!settings.apiKey) {
+            await sendToEndpoint(endpoint, {
+              type: 'ANALYZE_ERROR',
+              code: 'no_api_key',
+              message: 'No API key configured. Open Settings to add your Anthropic API key.',
+              ...ids,
+            });
+            return { ok: false };
+          }
+          const sessionSettings = getRequestSessionSettings(
+            message.sessionSettings,
+            settings,
+          );
+          const result = await analyzeImage(
+            settings.apiKey,
+            message.dataUrl,
+            {
+              hiddenInstruction: sessionSettings.defaultPrompt,
+              userQuestion: message.question,
+              signal: generation.controller.signal,
+              onDelta: makeDeltaRelay(endpoint, ids, generation),
+              limits: sessionSettings.limits,
+            },
+          );
+
+          if (!generations.isCurrent(ownerTabId, message.requestId)) {
+            return { ok: false, aborted: true };
+          }
+          await sendToEndpoint(endpoint, {
+            type: 'ANALYZE_RESULT',
+            text: result.text,
+            history: result.history,
+            ...ids,
+          });
+          return { ok: true };
+        } finally {
+          generations.finish(ownerTabId, message.requestId);
+        }
+      }
+
+      case 'FOLLOW_UP': {
+        const generation = generations.start(
+          ownerTabId,
+          endpointDocumentId(endpoint),
+          message.captureId,
+          message.requestId,
+        );
+        if (!generation) return { ok: false, duplicate: true };
+        const ids = {
+          captureId: message.captureId,
+          requestId: message.requestId,
+          screenshotId: message.screenshotId,
+        };
+
+        try {
+          const settings = await getSettings();
+          if (!settings.apiKey) {
+            await sendToEndpoint(endpoint, {
+              type: 'ANALYZE_ERROR',
+              code: 'no_api_key',
+              message: 'No API key configured. Open Settings to add your Anthropic API key.',
+              ...ids,
+            });
+            return { ok: false };
+          }
+          const sessionSettings = getRequestSessionSettings(
+            message.sessionSettings,
+            settings,
+          );
+          const result = await followUp(
+            settings.apiKey,
+            message.text,
+            message.history,
+            {
+              signal: generation.controller.signal,
+              onDelta: makeDeltaRelay(endpoint, ids, generation),
+              sessionInstruction: sessionSettings.defaultPrompt,
+              limits: sessionSettings.limits,
+            },
+          );
+
+          if (!generations.isCurrent(ownerTabId, message.requestId)) {
+            return { ok: false, aborted: true };
+          }
+          await sendToEndpoint(endpoint, {
+            type: 'ANALYZE_RESULT',
+            text: result.text,
+            history: result.history,
+            ...ids,
+          });
+          return { ok: true };
+        } finally {
+          generations.finish(ownerTabId, message.requestId);
+        }
+      }
+
+      case 'CANCEL_GENERATION':
+        generations.cancel(ownerTabId, message.requestId);
+        return { ok: true };
+
+      case 'SNIP_CANCELLED': {
+        const key = endpointKey(endpoint);
+        frozenCaptureById.delete(message.captureId);
+        if (isCurrentCapture(endpoint, message.captureId)) {
+          captureByEndpoint.delete(key);
+        }
+        generations.cancelCapture(ownerTabId, message.captureId);
+        return { ok: true };
+      }
+
+      case 'UI_UNAVAILABLE':
+        if (endpoint.kind === 'content') {
+          await showActionBadge(
+            ownerTabId,
+            'SnapScreen could not open its isolated UI on this page. Please try again.',
+          );
+        }
+        return { ok: true };
+    }
+  } catch (error) {
+    if (isAbortError(error)) return { ok: false, aborted: true };
+
+    const failure = getPublicGenerationError(error);
+    if (message.type === 'ANALYZE' || message.type === 'FOLLOW_UP') {
+      await safeSendToEndpoint(endpoint, {
+        type: 'ANALYZE_ERROR',
+        code: failure.code,
+        message: failure.message,
+        captureId: message.captureId,
+        requestId: message.requestId,
+        screenshotId: message.screenshotId,
+      });
+    }
+    return { error: failure.message };
+  }
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -453,6 +1215,21 @@ chrome.commands.onCommand.addListener((command, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const workspaceSessionId = workspaceSessionByTab.get(tabId);
+  if (workspaceSessionId) cleanupWorkspace(workspaceSessionId);
+  const sourceWorkspaceSessionId = workspaceSessionBySourceTab.get(tabId);
+  const sourceWorkspace = sourceWorkspaceSessionId
+    ? workspaceBySession.get(sourceWorkspaceSessionId)
+    : undefined;
+  if (sourceWorkspace) {
+    sourceWorkspace.sourceRecaptureAvailable = false;
+    workspaceSessionBySourceTab.delete(tabId);
+    void persistWorkspace(sourceWorkspace);
+    void safeSendToEndpoint(getWorkspaceEndpoint(sourceWorkspace), {
+      type: 'RESNIP_UNAVAILABLE',
+      message: 'The source tab was closed. Follow-up questions still work, but a new snip is unavailable.',
+    });
+  }
   documentVersionByTab.delete(tabId);
   clearTabState(tabId);
 });
@@ -464,11 +1241,30 @@ chrome.tabs.onActivated.addListener(({ windowId }) => {
   );
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // A URL-only update can be a same-document hash/history change. The content
   // script and its document-scoped session remain valid in that case.
   if (changeInfo.status === 'loading') {
+    const workspaceSessionId = workspaceSessionByTab.get(tabId);
+    if (
+      workspaceSessionId
+      && !isWorkspaceUrl(changeInfo.url ?? tab.url)
+    ) {
+      cleanupWorkspace(workspaceSessionId);
+    }
     documentVersionByTab.set(tabId, (documentVersionByTab.get(tabId) ?? 0) + 1);
+    const sourceWorkspaceSessionId = workspaceSessionBySourceTab.get(tabId);
+    const sourceWorkspace = sourceWorkspaceSessionId
+      ? workspaceBySession.get(sourceWorkspaceSessionId)
+      : undefined;
+    if (sourceWorkspace) {
+      sourceWorkspace.sourceRecaptureAvailable = false;
+      void persistWorkspace(sourceWorkspace);
+      void safeSendToEndpoint(getWorkspaceEndpoint(sourceWorkspace), {
+        type: 'RESNIP_UNAVAILABLE',
+        message: 'The source page changed. Return to it and invoke SnapScreen again to grant access.',
+      });
+    }
     clearTabState(tabId);
   }
 });
@@ -490,259 +1286,139 @@ chrome.runtime.onMessage.addListener((
     || typeof senderTab.id !== 'number'
   ) return;
 
-  const tabId = senderTab.id;
+  const endpoint = getContentEndpoint(senderTab.id, sender.documentId);
+  void handleControllerMessage(message, endpoint, senderTab)
+    .then(sendResponse);
+  return true;
+});
 
-  void (async () => {
-    try {
-      switch (message.type) {
-        case 'REQUEST_SNIP': {
-          if (senderTab.windowId === undefined) {
-            sendResponse({ error: 'No tab context' });
-            return;
-          }
-          await startSnip(
-            tabId,
-            senderTab.windowId,
-            documentVersionByTab.get(tabId) ?? 0,
-            message.sessionSettings,
-          );
-          sendResponse({ ok: true });
-          break;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== WORKSPACE_PORT_NAME) return;
+  const portSender = port.sender;
+  if (!portSender || !isTrustedWorkspaceSender(portSender)) {
+    port.disconnect();
+    return;
+  }
+
+  const workspaceTabId = portSender.tab?.id;
+  if (typeof workspaceTabId !== 'number') {
+    port.disconnect();
+    return;
+  }
+
+  let authenticatedSessionId: string | null = null;
+
+  port.onMessage.addListener((value: unknown) => {
+    void (async () => {
+      if (!isWorkspaceToBackgroundMessage(value)) return;
+
+      if (value.type === 'SNAPSCREEN_WORKSPACE_CLAIM') {
+        const record = workspaceBySession.get(value.sessionId)
+          ?? await restoreWorkspace(value.sessionId);
+        const isInitialClaim = value.nonce !== undefined;
+        const credentialMatches = isInitialClaim
+          ? !record?.claimed && record?.initialNonce === value.nonce
+          : record?.claimed && record.reconnectToken === value.reconnectToken;
+        if (
+          !record
+          || !credentialMatches
+          || record.workspaceTabId !== workspaceTabId
+          || (record.port !== undefined && record.port !== port)
+        ) {
+          port.disconnect();
+          return;
         }
 
-        case 'CAPTURE_REGION': {
-          if (senderTab.windowId === undefined) {
-            sendResponse({ error: 'No tab context' });
-            return;
+        if (isInitialClaim) {
+          record.claimed = true;
+          record.initialNonce = undefined;
+          record.reconnectToken = createCapabilityNonce();
+          if (record.claimTimer !== undefined) {
+            clearTimeout(record.claimTimer);
+            record.claimTimer = undefined;
           }
-
-          const target = getDocumentTarget(tabId, sender.documentId);
-          if (!beginCapture(target, message.captureId)) {
-            sendResponse({ ok: false, duplicate: true });
-            return;
-          }
-
-          try {
-            const frozenCapture = frozenCaptureById.get(message.captureId);
-            frozenCaptureById.delete(message.captureId);
-            const cropped = await cropImage(
-              frozenCapture?.tabId === tabId
-                ? frozenCapture.dataUrl
-                : message.dataUrl,
-              message.rect,
-              message.devicePixelRatio,
-            );
-
-            if (!isCurrentCapture(target, message.captureId)) {
-              sendResponse({ ok: false, stale: true });
-              return;
-            }
-
-            await sendToDocument(target, {
-              type: 'CROPPED_IMAGE',
-              dataUrl: cropped,
-              captureId: message.captureId,
-            });
-            sendResponse({ ok: true });
-          } catch (err) {
-            if (err instanceof CaptureSupersededError) {
-              sendResponse({ ok: false, stale: true });
-              return;
-            }
-
-            const failure = getPublicCaptureError(err);
-            await safeSendToDocument(target, {
-              type: 'CAPTURE_ERROR',
-              code: failure.code,
-              message: failure.message,
-              captureId: message.captureId,
-            });
-            sendResponse({ error: failure.message });
-          }
-          break;
+          await persistWorkspace(record);
         }
-
-        case 'ANALYZE': {
-          const target = getDocumentTarget(tabId, sender.documentId);
-          const generation = generations.start(
-            tabId,
-            sender.documentId,
-            message.captureId,
-            message.requestId,
-          );
-          if (!generation) {
-            sendResponse({ ok: false, duplicate: true });
+        if (record.disconnectTimer !== undefined) {
+          clearTimeout(record.disconnectTimer);
+          record.disconnectTimer = undefined;
+        }
+        authenticatedSessionId = record.sessionId;
+        record.port = port;
+        workspaceBySession.set(record.sessionId, record);
+        workspaceSessionBySourceTab.set(record.sourceTabId, record.sessionId);
+        workspaceSessionByTab.set(record.workspaceTabId, record.sessionId);
+        if (
+          value.needsInitialState
+          && !record.pendingStart
+          && !record.pendingError
+        ) {
+          if (record.acceptingInitialStart) {
+            record.awaitingInitialClaim = true;
             return;
           }
-          const ids = {
-            captureId: message.captureId,
-            requestId: message.requestId,
-            screenshotId: message.screenshotId,
+          record.pendingError = {
+            code: 'capture_expired',
+            message: 'The frozen screenshot expired before the workspace opened. Return to the source tab and try again.',
           };
-
-          try {
-            const settings = await getSettings();
-            if (!settings.apiKey) {
-              await sendToDocument(target, {
-                type: 'ANALYZE_ERROR',
-                code: 'no_api_key',
-                message: 'No API key configured. Open Settings to add your Anthropic API key.',
-                ...ids,
-              });
-              sendResponse({ ok: false });
-              return;
-            }
-            const sessionSettings = getRequestSessionSettings(
-              message.sessionSettings,
-              settings,
-            );
-
-            const result = await analyzeImage(
-              settings.apiKey,
-              message.dataUrl,
-              {
-                hiddenInstruction: sessionSettings.defaultPrompt,
-                userQuestion: message.question,
-                signal: generation.controller.signal,
-                onDelta: makeDeltaRelay(target, ids, generation),
-                limits: sessionSettings.limits,
-              },
-            );
-
-            if (!generations.isCurrent(tabId, message.requestId)) {
-              sendResponse({ ok: false, aborted: true });
-              return;
-            }
-
-            await sendToDocument(target, {
-              type: 'ANALYZE_RESULT',
-              text: result.text,
-              history: result.history,
-              ...ids,
-            });
-            sendResponse({ ok: true });
-          } finally {
-            generations.finish(tabId, message.requestId);
-          }
-          break;
         }
-
-        case 'FOLLOW_UP': {
-          const target = getDocumentTarget(tabId, sender.documentId);
-          const generation = generations.start(
-            tabId,
-            sender.documentId,
-            message.captureId,
-            message.requestId,
-          );
-          if (!generation) {
-            sendResponse({ ok: false, duplicate: true });
-            return;
-          }
-          const ids = {
-            captureId: message.captureId,
-            requestId: message.requestId,
-            screenshotId: message.screenshotId,
-          };
-
-          try {
-            const settings = await getSettings();
-            if (!settings.apiKey) {
-              await sendToDocument(target, {
-                type: 'ANALYZE_ERROR',
-                code: 'no_api_key',
-                message: 'No API key configured. Open Settings to add your Anthropic API key.',
-                ...ids,
-              });
-              sendResponse({ ok: false });
-              return;
-            }
-            const sessionSettings = getRequestSessionSettings(
-              message.sessionSettings,
-              settings,
-            );
-
-            const result = await followUp(
-              settings.apiKey,
-              message.text,
-              message.history,
-              {
-                signal: generation.controller.signal,
-                onDelta: makeDeltaRelay(target, ids, generation),
-                sessionInstruction: sessionSettings.defaultPrompt,
-                limits: sessionSettings.limits,
-              },
-            );
-
-            if (!generations.isCurrent(tabId, message.requestId)) {
-              sendResponse({ ok: false, aborted: true });
-              return;
-            }
-
-            await sendToDocument(target, {
-              type: 'ANALYZE_RESULT',
-              text: result.text,
-              history: result.history,
-              ...ids,
-            });
-            sendResponse({ ok: true });
-          } finally {
-            generations.finish(tabId, message.requestId);
-          }
-          break;
-        }
-
-        case 'CANCEL_GENERATION': {
-          generations.cancel(tabId, message.requestId);
-          sendResponse({ ok: true });
-          break;
-        }
-
-        case 'SNIP_CANCELLED': {
-          const target = getDocumentTarget(tabId, sender.documentId);
-          const key = documentKey(tabId, sender.documentId);
-          frozenCaptureById.delete(message.captureId);
-          if (isCurrentCapture(target, message.captureId)) {
-            captureByDocument.delete(key);
-          }
-          generations.cancelCapture(tabId, message.captureId);
-          sendResponse({ ok: true });
-          break;
-        }
-
-        case 'UI_UNAVAILABLE': {
-          await showActionBadge(
-            tabId,
-            'SnapScreen could not open its isolated UI on this page. Please try again.',
-          );
-          sendResponse({ ok: true });
-          break;
-        }
-      }
-    } catch (err) {
-      if (isAbortError(err)) {
-        sendResponse({ ok: false, aborted: true });
+        postWorkspaceReady(record);
         return;
       }
 
-      const failure = getPublicGenerationError(err);
-
       if (
-        (message.type === 'ANALYZE' || message.type === 'FOLLOW_UP')
-      ) {
-        const target = getDocumentTarget(tabId, sender.documentId);
-        await safeSendToDocument(target, {
-          type: 'ANALYZE_ERROR',
-          code: failure.code,
-          message: failure.message,
-          captureId: message.captureId,
-          requestId: message.requestId,
-          screenshotId: message.screenshotId,
-        });
-      }
-      sendResponse({ error: failure.message });
-    }
-  })();
+        authenticatedSessionId === null
+        || value.sessionId !== authenticatedSessionId
+      ) return;
+      const record = workspaceBySession.get(authenticatedSessionId);
+      if (!record || record.port !== port) return;
 
-  return true;
+      if (value.type === 'SNAPSCREEN_WORKSPACE_CLOSE') {
+        await closeWorkspace(record);
+        return;
+      }
+
+      const requestIds = record.requestIds ??= new Set<string>();
+      if (requestIds.has(value.requestId)) {
+        port.postMessage({
+          type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+          sessionId: record.sessionId,
+          requestId: value.requestId,
+          response: { error: 'Duplicate workspace request.' },
+        });
+        return;
+      }
+      if (requestIds.size >= 200) {
+        const oldest = requestIds.values().next().value;
+        if (oldest !== undefined) requestIds.delete(oldest);
+      }
+      requestIds.add(value.requestId);
+
+      const response = await handleControllerMessage(
+        value.message,
+        getWorkspaceEndpoint(record),
+      );
+      if (record.port !== port) return;
+      port.postMessage({
+        type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+        sessionId: record.sessionId,
+        requestId: value.requestId,
+        response,
+      });
+    })().catch(() => {
+      port.disconnect();
+    });
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (!authenticatedSessionId) return;
+    const record = workspaceBySession.get(authenticatedSessionId);
+    if (record?.port !== port) return;
+    record.port = undefined;
+    record.disconnectTimer = setTimeout(() => {
+      if (record.port || workspaceBySession.get(record.sessionId) !== record) return;
+      record.disconnectTimer = undefined;
+      generations.clearTab(record.workspaceTabId);
+    }, WORKSPACE_DISCONNECT_TIMEOUT_MS);
+  });
 });

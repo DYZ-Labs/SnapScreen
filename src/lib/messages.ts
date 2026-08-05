@@ -7,6 +7,13 @@ export interface Rect {
   height: number;
 }
 
+export interface CaptureSelection {
+  /** Rectangle in the selector viewport, used to position the result panel. */
+  viewportRect: Rect;
+  /** Rectangle relative to the frozen screenshot, with every value in [0, 1]. */
+  normalizedRect: Rect;
+}
+
 export type AnthropicContentBlock =
   | { type: 'text'; text: string }
   | {
@@ -60,13 +67,13 @@ export type BgToCsMessage =
       requestId: string;
       screenshotId: string;
     }
+  | { type: 'RESNIP_UNAVAILABLE'; message: string }
   | { type: 'SHOW_ERROR'; message: string };
 
 export type CsToBgMessage =
   | {
       type: 'CAPTURE_REGION';
-      rect: Rect;
-      devicePixelRatio: number;
+      selection: CaptureSelection;
       captureId: string;
       dataUrl: string;
     }

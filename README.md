@@ -10,6 +10,10 @@ answer back into an overlay panel, where you can keep asking follow-ups about th
 
 - **Snip mode** — click the toolbar icon or press `Alt+Shift+S` (`Option+Shift+S` on macOS)
 - **Region selection** — drag a rectangle, or create and adjust one entirely from the keyboard
+- **Universal tab capture** — works on every visible tab Chrome allows extensions to capture,
+  including browser pages, the Chrome Web Store, PDFs, data URLs, and opted-in local files
+- **Trusted fallback workspace** — protected tabs open their frozen screenshot in one reusable
+  extension tab when Chrome blocks in-page UI injection
 - **AI analysis** — sends the capture to Claude's vision API with your question
 - **Follow-up questions** — ask more about the same screenshot without re-capturing
 - **Streaming answers** — responses appear word by word as they're generated
@@ -61,11 +65,22 @@ Visit `chrome://extensions/shortcuts` to confirm or change the snip shortcut. If
 
 ## Usage
 
-1. Navigate to any normal web page
+1. Navigate to the tab you want to capture
 2. Click the SnapScreen icon or press `Alt+Shift+S` / `Option+Shift+S`
 3. Drag to select a region, or press **Enter** to create a keyboard selection
 4. Wait for the AI answer to appear in the overlay panel
 5. Type a follow-up question if needed
+
+On pages where Chrome does not permit content-script injection, SnapScreen opens a trusted
+extension workspace containing the already-frozen screenshot. **New snip** briefly returns to
+the source tab, captures it, and returns to the same workspace. **Close** returns to the source
+tab and closes the workspace. If the source navigates or closes, the existing screenshot and
+follow-up conversation remain available, but a new snip requires invoking SnapScreen again on
+the source page.
+
+For `file://` pages, Chrome asks for the optional local-file host permission. Chrome also has a
+separate **Allow access to file URLs** toggle on the extension's Manage Extension page; the
+workspace links there if that toggle is still off.
 
 For keyboard selection, use the **arrow keys** to move the rectangle, **Shift + arrow keys**
 to resize it, and **Enter** to confirm. Press **Esc** or click without dragging during
@@ -76,6 +91,7 @@ selection to cancel. Click outside the result panel to dismiss it.
 - `src/background/` — Manifest V3 service worker: screen capture and Anthropic API calls
 - `src/content/` — content script: crop selector and conversation state
 - `src/ui/` — the extension-origin iframe that renders the answer panel and composer
+- `src/workspace/` — trusted extension-page fallback for tabs that reject script injection
 - `src/options/` — settings page (API key, default prompt, request limits)
 - `src/lib/` — shared logic: API client, crop math, storage, request limits
 - `scripts/extension-smoke.mjs` — Playwright browser smoke test
@@ -112,8 +128,10 @@ once with `npx playwright install chromium`, and build before running it.
 ## Limitations
 
 - Captures only the **visible viewport** of the current tab (no full-page stitching)
-- Runs on regular HTTP(S) pages only; browser-internal, Web Store, file, and other special
-  pages are not supported
+- Chrome can omit or black out browser chrome, menus, permission dialogs, certificate/system
+  surfaces, and DRM-protected video pixels; SnapScreen does not bypass those browser/OS limits
+- Local files require both the optional `file:///*` permission and Chrome's per-extension
+  **Allow access to file URLs** toggle
 - Requires an internet connection and a valid Anthropic API key for AI analysis
 - Requires Chrome 116 or newer
 
@@ -130,7 +148,10 @@ This is defense in depth, not credential encryption: anyone who can access or co
 Chrome profile may still be able to extract the key. Use a dedicated Anthropic key with an
 appropriate spend limit, revoke it if the profile is lost or compromised, and remove it from
 SnapScreen when it is no longer needed. Screenshots are sent directly to Anthropic for
-analysis and are not persisted by SnapScreen.
+analysis and are not persisted by SnapScreen. A fallback screenshot remains only in memory:
+the background holds it until the exact workspace claims its one-time capability, after which
+the workspace page owns it. Only small source/workspace routing metadata is kept in
+`chrome.storage.session` so a service-worker restart can reconnect the workspace.
 
 ### Injected UI isolation
 
@@ -153,6 +174,13 @@ ordinary `window.postMessage`, page DOM events, or DOM attributes. Commands are 
 buffered until attestation completes. Privileged actions such as opening Settings are sent
 back to the trusted content controller rather than executed by the web-accessible frame, and
 normal background commands reject extension-frame senders.
+
+Pages that reject injection use a packaged workspace that is deliberately absent from
+`web_accessible_resources`. Its exact top-level extension URL and tab must claim a one-time
+session ID/nonce pair over a long-lived runtime port. Reconnects use a separate credential;
+requests and streamed events are correlated and targeted to that authenticated workspace.
+Workspace messages never supply the source tab ID, and the API key and Anthropic network
+requests remain in the background worker.
 
 This boundary protects confidentiality and prevents page capture listeners from cancelling
 the frame's keyboard/input handling, but it is not a tamper-proof browser surface. Chrome

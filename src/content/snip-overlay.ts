@@ -1,10 +1,15 @@
-import type { Rect } from '../lib/messages';
+import type { CaptureSelection, Rect } from '../lib/messages';
 import {
   adjustKeyboardCrop,
   clampKeyboardCrop,
   createKeyboardCrop,
   MIN_CROP_SIZE,
 } from './keyboard-crop';
+import {
+  createCaptureSelection,
+  denormalizeRect,
+  getContainedImageBounds,
+} from './selection-geometry';
 import {
   getUiRoot,
   queryUiElement,
@@ -17,7 +22,8 @@ const SNIP_INSTRUCTION = 'Drag to select a region. Click to cancel';
 
 export interface SnipOverlayOptions {
   dataUrl: string;
-  onRegionSelected: (rect: Rect) => void;
+  imageFit?: 'contain' | 'fill';
+  onRegionSelected: (selection: CaptureSelection) => void;
   onCancelled: () => void;
 }
 
@@ -27,16 +33,6 @@ let disposeActiveOverlay: SnipOverlayDisposer | null = null;
 
 function getViewport(): { width: number; height: number } {
   return { width: window.innerWidth, height: window.innerHeight };
-}
-
-function clampPointerToViewport(clientX: number, clientY: number): {
-  x: number;
-  y: number;
-} {
-  return {
-    x: Math.min(Math.max(clientX, 0), window.innerWidth),
-    y: Math.min(Math.max(clientY, 0), window.innerHeight),
-  };
 }
 
 export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDisposer {
@@ -54,10 +50,36 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
 
   const frozenPage = document.createElement('img');
   frozenPage.className = 'snapscreen-frozen-page';
+  frozenPage.classList.toggle(
+    'snapscreen-frozen-page-contain',
+    options.imageFit === 'contain',
+  );
   frozenPage.src = options.dataUrl;
   frozenPage.alt = '';
   frozenPage.draggable = false;
   frozenPage.setAttribute('aria-hidden', 'true');
+
+  function getImageBounds(): Rect {
+    const viewport = getViewport();
+    if (options.imageFit !== 'contain') {
+      return { x: 0, y: 0, ...viewport };
+    }
+    return getContainedImageBounds(viewport, {
+      width: frozenPage.naturalWidth,
+      height: frozenPage.naturalHeight,
+    });
+  }
+
+  function clampPointerToImage(clientX: number, clientY: number): {
+    x: number;
+    y: number;
+  } {
+    const bounds = getImageBounds();
+    return {
+      x: Math.min(Math.max(clientX, bounds.x), bounds.x + bounds.width),
+      y: Math.min(Math.max(clientY, bounds.y), bounds.y + bounds.height),
+    };
+  }
 
   const dim = document.createElement('div');
   dim.className = 'snapscreen-dim';
@@ -93,6 +115,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   let active = true;
   let firstPaintFrame: number | null = null;
   let secondPaintFrame: number | null = null;
+  let lastImageBounds = getImageBounds();
 
   function describeSelection(rect: Rect): string {
     return `Selection at ${Math.round(rect.x)}, ${Math.round(rect.y)}, `
@@ -122,6 +145,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
       return;
     }
 
+    const completedSelection = createCaptureSelection(rect, getImageBounds());
     teardown(false);
     firstPaintFrame = requestAnimationFrame(() => {
       firstPaintFrame = null;
@@ -130,7 +154,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
         if (!active) return;
         active = false;
         if (disposeActiveOverlay === dispose) disposeActiveOverlay = null;
-        options.onRegionSelected(rect);
+        options.onRegionSelected(completedSelection);
       });
     });
   }
@@ -150,7 +174,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
     activePointerId = e.pointerId;
     keyboardRect = null;
     selection.classList.remove('snapscreen-selection-keyboard');
-    const start = clampPointerToViewport(e.clientX, e.clientY);
+    const start = clampPointerToImage(e.clientX, e.clientY);
     startX = start.x;
     startY = start.y;
     currentX = start.x;
@@ -162,7 +186,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
 
   function onPointerMove(e: PointerEvent): void {
     if (!dragging || e.pointerId !== activePointerId) return;
-    const pointer = clampPointerToViewport(e.clientX, e.clientY);
+    const pointer = clampPointerToImage(e.clientX, e.clientY);
     currentX = pointer.x;
     currentY = pointer.y;
     updateSelection(rectFromPointer());
@@ -178,7 +202,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
     if (!dragging || e.pointerId !== activePointerId) return;
     dragging = false;
 
-    const pointer = clampPointerToViewport(e.clientX, e.clientY);
+    const pointer = clampPointerToImage(e.clientX, e.clientY);
     currentX = pointer.x;
     currentY = pointer.y;
     if (root.hasPointerCapture?.(e.pointerId)) {
@@ -217,7 +241,11 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
       consumeKeyboardEvent(e);
       if (e.repeat) return;
       if (!keyboardRect) {
-        keyboardRect = createKeyboardCrop(getViewport());
+        const bounds = getImageBounds();
+        const localRect = createKeyboardCrop(bounds);
+        keyboardRect = localRect
+          ? { ...localRect, x: localRect.x + bounds.x, y: localRect.y + bounds.y }
+          : null;
         if (keyboardRect) updateSelection(keyboardRect, true);
         return;
       }
@@ -236,19 +264,31 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
 
     consumeKeyboardEvent(e);
     if (!keyboardRect) return;
-    keyboardRect = adjustKeyboardCrop(
-      keyboardRect,
+    const bounds = getImageBounds();
+    const localRect = {
+      ...keyboardRect,
+      x: keyboardRect.x - bounds.x,
+      y: keyboardRect.y - bounds.y,
+    };
+    const adjusted = adjustKeyboardCrop(
+      localRect,
       e.key,
       e.shiftKey,
-      getViewport(),
+      bounds,
     );
+    keyboardRect = adjusted
+      ? { ...adjusted, x: adjusted.x + bounds.x, y: adjusted.y + bounds.y }
+      : null;
     if (keyboardRect) updateSelection(keyboardRect, true);
   }
 
   function onResize(): void {
+    const previousBounds = lastImageBounds;
+    const bounds = getImageBounds();
+    lastImageBounds = bounds;
     if (dragging) {
-      const start = clampPointerToViewport(startX, startY);
-      const current = clampPointerToViewport(currentX, currentY);
+      const start = clampPointerToImage(startX, startY);
+      const current = clampPointerToImage(currentX, currentY);
       startX = start.x;
       startY = start.y;
       currentX = current.x;
@@ -256,7 +296,17 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
       updateSelection(rectFromPointer());
     }
     if (!keyboardRect) return;
-    keyboardRect = clampKeyboardCrop(keyboardRect, getViewport());
+    const normalized = createCaptureSelection(keyboardRect, previousBounds).normalizedRect;
+    const resizedRect = denormalizeRect(normalized, bounds);
+    const localRect = {
+      ...resizedRect,
+      x: resizedRect.x - bounds.x,
+      y: resizedRect.y - bounds.y,
+    };
+    const clamped = clampKeyboardCrop(localRect, bounds);
+    keyboardRect = clamped
+      ? { ...clamped, x: clamped.x + bounds.x, y: clamped.y + bounds.y }
+      : null;
     if (keyboardRect) {
       updateSelection(keyboardRect, true);
     } else {
@@ -297,6 +347,7 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   root.addEventListener('pointercancel', onPointerCancel);
   root.addEventListener('keydown', onKeyDown);
   window.addEventListener('resize', onResize);
+  frozenPage.addEventListener('load', onResize);
   root.focus({ preventScroll: true });
 
   disposeActiveOverlay = dispose;

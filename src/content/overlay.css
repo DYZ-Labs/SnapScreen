@@ -42,6 +42,11 @@
   user-select: none;
 }
 
+.snapscreen-frozen-page-contain {
+  object-fit: contain;
+  background: #111;
+}
+
 .snapscreen-dim {
   position: absolute;
   inset: 0;

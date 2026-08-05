@@ -56,8 +56,9 @@ if (bootstrap) {
         disposeResultPanel();
         startSnipOverlay({
           dataUrl: value.dataUrl,
-          onRegionSelected(rect) {
-            post({ type: 'SNAPSCREEN_UI_REGION_SELECTED', sessionId, rect });
+          imageFit: value.imageFit,
+          onRegionSelected(selection) {
+            post({ type: 'SNAPSCREEN_UI_REGION_SELECTED', sessionId, selection });
           },
           onCancelled() {
             post({ type: 'SNAPSCREEN_UI_SNIP_CANCELLED', sessionId });

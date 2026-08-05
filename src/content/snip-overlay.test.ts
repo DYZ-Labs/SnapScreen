@@ -160,10 +160,13 @@ describe('keyboard crop selection', () => {
     frames.shift()?.(0);
 
     expect(onRegionSelected).toHaveBeenCalledWith({
-      x: 350,
-      y: 210,
-      width: 320,
-      height: 190,
+      viewportRect: { x: 350, y: 210, width: 320, height: 190 },
+      normalizedRect: {
+        x: 0.35,
+        y: 0.35,
+        width: 0.32,
+        height: 190 / 600,
+      },
     });
   });
 
@@ -230,10 +233,8 @@ describe('keyboard crop selection', () => {
     frames.shift()?.(0);
 
     expect(onRegionSelected).toHaveBeenCalledWith({
-      x: 25,
-      y: 30,
-      width: 100,
-      height: 60,
+      viewportRect: { x: 25, y: 30, width: 100, height: 60 },
+      normalizedRect: { x: 0.025, y: 0.05, width: 0.1, height: 0.1 },
     });
   });
 
@@ -270,10 +271,13 @@ describe('keyboard crop selection', () => {
 
     expect(releasePointerCapture).not.toHaveBeenCalled();
     expect(onRegionSelected).toHaveBeenCalledWith({
-      x: 10,
-      y: 20,
-      width: 100,
-      height: 60,
+      viewportRect: { x: 10, y: 20, width: 100, height: 60 },
+      normalizedRect: {
+        x: 0.01,
+        y: 20 / 600,
+        width: 0.1,
+        height: 0.1,
+      },
     });
   });
 
@@ -293,10 +297,73 @@ describe('keyboard crop selection', () => {
     frames.shift()?.(0);
 
     expect(onRegionSelected).toHaveBeenCalledWith({
-      x: 900,
-      y: 500,
-      width: 100,
-      height: 100,
+      viewportRect: { x: 900, y: 500, width: 100, height: 100 },
+      normalizedRect: {
+        x: 0.9,
+        y: 500 / 600,
+        width: 0.1,
+        height: 100 / 600,
+      },
+    });
+  });
+
+  it('normalizes workspace pointer selections against the letterboxed image', () => {
+    const frames = installAnimationFrameQueue();
+    const onRegionSelected = vi.fn();
+    startSnipOverlay({
+      imageFit: 'contain',
+      onRegionSelected,
+      onCancelled: vi.fn(),
+    });
+    const image = uiQuery<HTMLImageElement>('.snapscreen-frozen-page')!;
+    Object.defineProperties(image, {
+      naturalWidth: { configurable: true, value: 1600 },
+      naturalHeight: { configurable: true, value: 900 },
+    });
+    image.dispatchEvent(new Event('load'));
+
+    dispatchOverlayPointer('pointerdown', { button: 0, clientX: 100, clientY: 0 });
+    dispatchOverlayPointer('pointerup', { clientX: 500, clientY: 300 });
+    frames.shift()?.(0);
+    frames.shift()?.(0);
+
+    expect(onRegionSelected).toHaveBeenCalledWith({
+      viewportRect: { x: 100, y: 18.75, width: 400, height: 281.25 },
+      normalizedRect: { x: 0.1, y: 0, width: 0.4, height: 0.5 },
+    });
+  });
+
+  it('preserves a workspace keyboard selection when the viewport resizes', () => {
+    const frames = installAnimationFrameQueue();
+    const onRegionSelected = vi.fn();
+    startSnipOverlay({
+      imageFit: 'contain',
+      onRegionSelected,
+      onCancelled: vi.fn(),
+    });
+    const image = uiQuery<HTMLImageElement>('.snapscreen-frozen-page')!;
+    Object.defineProperties(image, {
+      naturalWidth: { configurable: true, value: 1600 },
+      naturalHeight: { configurable: true, value: 900 },
+    });
+    image.dispatchEvent(new Event('load'));
+    dispatchOverlayKey('Enter');
+
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 });
+    window.dispatchEvent(new Event('resize'));
+    dispatchOverlayKey('Enter');
+    frames.shift()?.(0);
+    frames.shift()?.(0);
+
+    expect(onRegionSelected).toHaveBeenCalledWith({
+      viewportRect: { x: 272, y: 327.8, width: 256, height: 144 },
+      normalizedRect: {
+        x: 0.34,
+        y: 0.33955555555555555,
+        width: 0.32,
+        height: 0.32,
+      },
     });
   });
 
@@ -319,10 +386,13 @@ describe('keyboard crop selection', () => {
     frames.shift()?.(0);
 
     expect(onRegionSelected).toHaveBeenCalledWith({
-      x: 680,
-      y: 380,
-      width: 20,
-      height: 20,
+      viewportRect: { x: 680, y: 380, width: 20, height: 20 },
+      normalizedRect: {
+        x: 680 / 700,
+        y: 0.95,
+        width: 20 / 700,
+        height: 0.05,
+      },
     });
   });
 

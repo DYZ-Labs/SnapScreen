@@ -94,7 +94,7 @@ function handleFrameMessage(
       captureGapCancel = options.onCancelled;
       overlayOptions = null;
       host.setInteractive(false);
-      options.onRegionSelected(message.rect);
+      options.onRegionSelected(message.selection);
       break;
     }
 
@@ -157,7 +157,11 @@ export function startSnipOverlay(options: SnipOverlayOptions): SnipOverlayDispos
   overlayOptions = options;
   const host = ensureHost();
   host.setInteractive(true);
-  host.send({ type: 'SNAPSCREEN_UI_START_SNIP', dataUrl: options.dataUrl });
+  host.send({
+    type: 'SNAPSCREEN_UI_START_SNIP',
+    dataUrl: options.dataUrl,
+    imageFit: options.imageFit,
+  });
 
   let disposed = false;
   return () => {

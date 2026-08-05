@@ -9,6 +9,7 @@ const FIXTURE_URL = 'https://api.anthropic.com/snapscreen-smoke';
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const UI_HOST_SELECTOR = '#snapscreen-ui-host';
 const UI_FRAME_PATH = '/src/ui/result-frame.html';
+const WORKSPACE_PATH = '/src/workspace/workspace.html';
 const ANSWER_SENTINEL = 'SNAPSCREEN_SMOKE_ANSWER_7C91F2';
 const COMPOSER_SENTINEL = 'SNAPSCREEN_SMOKE_COMPOSER_4A8DE6';
 const HIDDEN_PROMPT = 'What does this show? Answer accurately and concisely.';
@@ -46,6 +47,18 @@ async function verifyBuild() {
   if (!Array.isArray(manifest.permissions) || !manifest.permissions.includes('activeTab')) {
     throw new Error('The built extension is missing its activeTab permission.');
   }
+  if (
+    !Array.isArray(manifest.optional_host_permissions)
+    || !manifest.optional_host_permissions.includes('file:///*')
+  ) {
+    throw new Error('The built extension is missing its optional local-file permission.');
+  }
+
+  const webAccessibleResources = (manifest.web_accessible_resources ?? [])
+    .flatMap((entry) => entry.resources ?? []);
+  if (webAccessibleResources.includes(WORKSPACE_PATH.slice(1))) {
+    throw new Error('The trusted workspace must not be web-accessible.');
+  }
 
   const contentScript = 'src/content/index.js';
   const contentSource = await readFile(join(DIST, contentScript), 'utf8');
@@ -60,6 +73,11 @@ async function verifyBuild() {
     await readFile(join(DIST, UI_FRAME_PATH.slice(1)), 'utf8');
   } catch (error) {
     throw new Error(`Could not read the built UI frame at ${UI_FRAME_PATH}.`, { cause: error });
+  }
+  try {
+    await readFile(join(DIST, WORKSPACE_PATH.slice(1)), 'utf8');
+  } catch (error) {
+    throw new Error(`Could not read the built workspace at ${WORKSPACE_PATH}.`, { cause: error });
   }
 
   return contentScript;

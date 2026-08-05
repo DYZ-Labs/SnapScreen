@@ -1,4 +1,4 @@
-import type { DisplayMessage, Rect } from './messages';
+import type { CaptureSelection, DisplayMessage, Rect } from './messages';
 
 export const UI_FRAME_PATH = 'src/ui/result-frame.html';
 export const UI_CONNECT_MESSAGE = 'SNAPSCREEN_UI_CONNECT' as const;
@@ -39,6 +39,7 @@ export type ControllerToFrameMessage =
       type: 'SNAPSCREEN_UI_START_SNIP';
       sessionId: string;
       dataUrl: string;
+      imageFit?: 'contain' | 'fill';
     }
   | { type: 'SNAPSCREEN_UI_DISPOSE_SNIP'; sessionId: string }
   | {
@@ -64,7 +65,7 @@ export type FrameToControllerMessage =
   | {
       type: 'SNAPSCREEN_UI_REGION_SELECTED';
       sessionId: string;
-      rect: Rect;
+      selection: CaptureSelection;
     }
   | { type: 'SNAPSCREEN_UI_SNIP_CANCELLED'; sessionId: string }
   | {
@@ -136,6 +137,22 @@ function isRect(value: unknown): value is Rect {
     && isFiniteNumber(value.height)
     && value.width >= 0
     && value.height >= 0;
+}
+
+function isNormalizedRect(value: unknown): value is Rect {
+  return isRect(value)
+    && value.x >= 0
+    && value.y >= 0
+    && value.width > 0
+    && value.height > 0
+    && value.x + value.width <= 1
+    && value.y + value.height <= 1;
+}
+
+function isCaptureSelection(value: unknown): value is CaptureSelection {
+  return isRecord(value)
+    && isRect(value.viewportRect)
+    && isNormalizedRect(value.normalizedRect);
 }
 
 function isDisplayMessage(value: unknown): value is DisplayMessage {
@@ -212,7 +229,12 @@ export function isControllerToFrameMessage(
       return true;
     case 'SNAPSCREEN_UI_START_SNIP':
       return isBoundedString(value.dataUrl, MAX_SCREENSHOT_DATA_URL)
-        && value.dataUrl.startsWith('data:image/png;base64,');
+        && value.dataUrl.startsWith('data:image/png;base64,')
+        && (
+          value.imageFit === undefined
+          || value.imageFit === 'contain'
+          || value.imageFit === 'fill'
+        );
     case 'SNAPSCREEN_UI_RENDER_RESULT':
       return isSerializedResultPanelState(value.state);
     case 'SNAPSCREEN_UI_UPDATE_STREAM':
@@ -236,7 +258,7 @@ export function isFrameToControllerMessage(
     case 'SNAPSCREEN_UI_SNIP_CANCELLED':
       return true;
     case 'SNAPSCREEN_UI_REGION_SELECTED':
-      return isRect(value.rect);
+      return isCaptureSelection(value.selection);
     case 'SNAPSCREEN_UI_FOLLOW_UP':
       return isBoundedString(value.text, 100_000);
     case 'SNAPSCREEN_UI_ACTION':

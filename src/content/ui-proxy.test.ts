@@ -4,7 +4,10 @@ interface FakeHostOptions {
   onMessage: (message: {
     type: string;
     sessionId: string;
-    rect?: { x: number; y: number; width: number; height: number };
+    selection?: {
+      viewportRect: { x: number; y: number; width: number; height: number };
+      normalizedRect: { x: number; y: number; width: number; height: number };
+    };
   }) => void;
   onUnexpectedDispose?: () => void;
   onUnavailable?: () => void;
@@ -58,7 +61,10 @@ import {
 const TEST_DATA_URL = 'data:image/png;base64,FROZEN';
 
 function startSnipOverlay(options: {
-  onRegionSelected: (rect: { x: number; y: number; width: number; height: number }) => void;
+  onRegionSelected: (selection: {
+    viewportRect: { x: number; y: number; width: number; height: number };
+    normalizedRect: { x: number; y: number; width: number; height: number };
+  }) => void;
   onCancelled: () => void;
 }): ReturnType<typeof startSnipOverlayInternal> {
   return startSnipOverlayInternal({ ...options, dataUrl: TEST_DATA_URL });
@@ -100,7 +106,10 @@ describe('isolated UI proxy lifecycle', () => {
     host.emit({
       type: 'SNAPSCREEN_UI_REGION_SELECTED',
       sessionId: 'session',
-      rect: { x: 10, y: 20, width: 100, height: 80 },
+      selection: {
+        viewportRect: { x: 10, y: 20, width: 100, height: 80 },
+        normalizedRect: { x: 0.1, y: 0.2, width: 0.5, height: 0.4 },
+      },
     });
     expect(onRegionSelected).toHaveBeenCalledTimes(1);
 

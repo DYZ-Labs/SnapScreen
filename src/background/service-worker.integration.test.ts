@@ -5,6 +5,12 @@ import {
   UI_REGISTER_CAPABILITY,
   type UiAttestationMessage,
 } from '../lib/ui-protocol';
+import {
+  WORKSPACE_PATH,
+  WORKSPACE_PORT_NAME,
+  type BackgroundToWorkspaceMessage,
+  type WorkspaceToBackgroundMessage,
+} from '../lib/workspace-protocol';
 
 const dependencies = vi.hoisted(() => ({
   analyzeImage: vi.fn(),
@@ -54,10 +60,43 @@ class FakeEvent<TArgs extends unknown[]> {
   }
 }
 
+class FakePort {
+  readonly disconnect: ReturnType<typeof vi.fn>;
+  readonly onDisconnect = new FakeEvent<[chrome.runtime.Port]>();
+  readonly onMessage = new FakeEvent<[unknown, chrome.runtime.Port]>();
+  readonly port: chrome.runtime.Port;
+  readonly postMessage = vi.fn();
+  private disconnected = false;
+
+  constructor(
+    sender: chrome.runtime.MessageSender,
+    name = WORKSPACE_PORT_NAME,
+  ) {
+    this.disconnect = vi.fn(() => {
+      if (this.disconnected) return;
+      this.disconnected = true;
+      this.onDisconnect.emit(this.port);
+    });
+    this.port = {
+      disconnect: this.disconnect,
+      name,
+      onDisconnect: this.onDisconnect,
+      onMessage: this.onMessage,
+      postMessage: this.postMessage,
+      sender,
+    } as unknown as chrome.runtime.Port;
+  }
+
+  send(message: WorkspaceToBackgroundMessage): void {
+    this.onMessage.emit(message, this.port);
+  }
+}
+
 interface WorkerHarness {
   actionClicked: FakeEvent<[chrome.tabs.Tab]>;
   command: FakeEvent<[string, chrome.tabs.Tab]>;
   installed: FakeEvent<[chrome.runtime.InstalledDetails]>;
+  connect: FakeEvent<[chrome.runtime.Port]>;
   message: FakeEvent<[
     unknown,
     chrome.runtime.MessageSender,
@@ -67,8 +106,12 @@ interface WorkerHarness {
   updated: FakeEvent<[number, chrome.tabs.OnUpdatedInfo, chrome.tabs.Tab]>;
   tabs: {
     captureVisibleTab: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
     query: ReturnType<typeof vi.fn>;
+    remove: ReturnType<typeof vi.fn>;
     sendMessage: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
   };
   action: {
     setBadgeText: ReturnType<typeof vi.fn>;
@@ -77,6 +120,17 @@ interface WorkerHarness {
   scripting: {
     executeScript: ReturnType<typeof vi.fn>;
     insertCSS: ReturnType<typeof vi.fn>;
+  };
+  extension: {
+    isAllowedFileSchemeAccess: ReturnType<typeof vi.fn>;
+  };
+  permissions: {
+    request: ReturnType<typeof vi.fn>;
+  };
+  storage: {
+    get: ReturnType<typeof vi.fn>;
+    remove: ReturnType<typeof vi.fn>;
+    set: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -134,6 +188,24 @@ function trustedUiFrameSender(
   });
 }
 
+function trustedWorkspaceSender(
+  tabId = 70,
+  url = `chrome-extension://test-extension/${WORKSPACE_PATH}`,
+): chrome.runtime.MessageSender {
+  return {
+    id: 'test-extension',
+    documentId: 'workspace-document-1',
+    frameId: 0,
+    origin: 'chrome-extension://test-extension',
+    url,
+    tab: {
+      ...trustedSender().tab!,
+      id: tabId,
+      url,
+    },
+  };
+}
+
 async function loadWorker(): Promise<WorkerHarness> {
   vi.resetModules();
 
@@ -145,14 +217,22 @@ async function loadWorker(): Promise<WorkerHarness> {
     chrome.runtime.MessageSender,
     (response?: unknown) => void,
   ]>();
+  const connect = new FakeEvent<[chrome.runtime.Port]>();
   const removed = new FakeEvent<[number, chrome.tabs.OnRemovedInfo]>();
   const activated = new FakeEvent<[chrome.tabs.OnActivatedInfo]>();
   const updated = new FakeEvent<[number, chrome.tabs.OnUpdatedInfo, chrome.tabs.Tab]>();
 
   const tabs = {
     captureVisibleTab: vi.fn(async () => 'data:image/png;base64,FULL'),
+    create: vi.fn(async () => ({ id: 70, windowId: 2 })),
+    get: vi.fn(async (tabId: number) => ({
+      ...trustedSender().tab!,
+      id: tabId,
+    })),
     query: vi.fn(async () => [{ id: 7, windowId: 2, active: true }]),
+    remove: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => undefined),
+    update: vi.fn(async (tabId: number) => ({ id: tabId, windowId: 2, active: true })),
   };
   const action = {
     setBadgeText: vi.fn(async () => undefined),
@@ -166,13 +246,31 @@ async function loadWorker(): Promise<WorkerHarness> {
     }]),
     insertCSS: vi.fn(async () => undefined),
   };
+  const extension = {
+    isAllowedFileSchemeAccess: vi.fn(async () => true),
+  };
+  const permissions = {
+    request: vi.fn(async () => true),
+  };
+  const storage = {
+    get: vi.fn(async () => ({})),
+    remove: vi.fn(async () => undefined),
+    set: vi.fn(async () => undefined),
+  };
 
   vi.stubGlobal('chrome', {
     runtime: {
+      getURL: (path: string) => `chrome-extension://test-extension/${path}`,
       id: 'test-extension',
+      onConnect: connect,
       onInstalled: installed,
       onMessage: message,
       openOptionsPage: vi.fn(async () => undefined),
+    },
+    extension,
+    permissions,
+    storage: {
+      session: storage,
     },
     action: {
       onClicked: actionClicked,
@@ -195,10 +293,14 @@ async function loadWorker(): Promise<WorkerHarness> {
     actionClicked,
     action,
     command,
+    connect,
+    extension,
     installed,
     message,
+    permissions,
     removed,
     scripting,
+    storage,
     updated,
     tabs,
   };
@@ -240,8 +342,10 @@ function captureRequest(
     type: 'CAPTURE_REGION',
     captureId,
     dataUrl: `data:image/png;base64,FULL_${captureId}`,
-    devicePixelRatio: 2,
-    rect: { x: 10, y: 20, width: 100, height: 50 },
+    selection: {
+      viewportRect: { x: 10, y: 20, width: 100, height: 50 },
+      normalizedRect: { x: 0.1, y: 0.2, width: 0.5, height: 0.25 },
+    },
   };
 }
 
@@ -275,6 +379,58 @@ function rejectWhenAborted(signal: AbortSignal): Promise<never> {
     }
     signal.addEventListener('abort', abort, { once: true });
   });
+}
+
+async function openRestrictedWorkspace(
+  harness: WorkerHarness,
+  sourceUrl = 'chrome://settings',
+): Promise<{ nonce: string; sessionId: string; sourceTab: chrome.tabs.Tab }> {
+  const sourceTab = { ...trustedSender().tab!, url: sourceUrl };
+  harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+  harness.scripting.executeScript.mockRejectedValue(new Error('Cannot inject'));
+  harness.tabs.get.mockImplementation(async (tabId: number) => (
+    tabId === sourceTab.id
+      ? sourceTab
+      : { ...trustedWorkspaceSender(tabId).tab!, id: tabId }
+  ));
+
+  harness.actionClicked.emit(sourceTab);
+  await vi.waitFor(() => expect(harness.tabs.create).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(harness.storage.set).toHaveBeenCalled());
+  const createProperties = harness.tabs.create.mock.calls[0]?.[0] as {
+    url?: string;
+  };
+  const workspaceUrl = new URL(createProperties.url!);
+  const params = new URLSearchParams(workspaceUrl.hash.slice(1));
+  const nonce = params.get('nonce');
+  const sessionId = params.get('session');
+  if (!nonce || !sessionId) throw new Error('Workspace capability was not created.');
+  return { nonce, sessionId, sourceTab };
+}
+
+async function claimWorkspace(
+  harness: WorkerHarness,
+  sessionId: string,
+  nonce: string,
+): Promise<{ port: FakePort; ready: Extract<BackgroundToWorkspaceMessage, {
+  type: 'SNAPSCREEN_WORKSPACE_READY';
+}> }> {
+  const port = new FakePort(trustedWorkspaceSender());
+  harness.connect.emit(port.port);
+  port.send({
+    type: 'SNAPSCREEN_WORKSPACE_CLAIM',
+    sessionId,
+    nonce,
+    needsInitialState: true,
+  });
+  await vi.waitFor(() => expect(port.postMessage).toHaveBeenCalled());
+  const ready = port.postMessage.mock.calls
+    .map(([message]) => message as BackgroundToWorkspaceMessage)
+    .find((message) => message.type === 'SNAPSCREEN_WORKSPACE_READY');
+  if (!ready || ready.type !== 'SNAPSCREEN_WORKSPACE_READY') {
+    throw new Error('Workspace did not receive its ready envelope.');
+  }
+  return { port, ready };
 }
 
 beforeEach(() => {
@@ -375,8 +531,7 @@ describe('service worker message integration', () => {
     expect(harness.tabs.captureVisibleTab).not.toHaveBeenCalled();
     expect(dependencies.cropImage).toHaveBeenCalledWith(
       'data:image/png;base64,FULL_capture-1',
-      { x: 10, y: 20, width: 100, height: 50 },
-      2,
+      { x: 0.1, y: 0.2, width: 0.5, height: 0.25 },
     );
     expect(harness.tabs.sendMessage).toHaveBeenCalledWith(
       7,
@@ -385,6 +540,30 @@ describe('service worker message integration', () => {
         captureId: 'capture-1',
         dataUrl: 'data:image/png;base64,CROPPED',
       },
+      { documentId: 'document-1' },
+    );
+  });
+
+  it('accepts controller messages from an opted-in top-level file document', async () => {
+    const harness = await loadWorker();
+    const fileUrl = 'file:///tmp/question.html';
+    const sender = trustedSender({
+      origin: 'file://',
+      url: fileUrl,
+      tab: { ...trustedSender().tab!, url: fileUrl },
+    });
+
+    await expect(dispatch(
+      harness,
+      captureRequest('file-capture'),
+      sender,
+    )).resolves.toEqual({ ok: true });
+    expect(harness.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: 'CROPPED_IMAGE',
+        captureId: 'file-capture',
+      }),
       { documentId: 'document-1' },
     );
   });
@@ -751,7 +930,7 @@ describe('service worker message integration', () => {
       1,
       7,
       { type: 'PREPARE_SNIP_CAPTURE' },
-      { documentId: 'document-1' },
+      { frameId: 0 },
     );
     expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
     const prepareOrder = harness.tabs.sendMessage.mock.invocationCallOrder[0];
@@ -779,8 +958,7 @@ describe('service worker message integration', () => {
     })).resolves.toEqual({ ok: true });
     expect(dependencies.cropImage).toHaveBeenLastCalledWith(
       'data:image/png;base64,FULL',
-      { x: 10, y: 20, width: 100, height: 50 },
-      2,
+      { x: 0.1, y: 0.2, width: 0.5, height: 0.25 },
     );
   });
 
@@ -832,7 +1010,11 @@ describe('service worker message integration', () => {
     await vi.waitFor(() => {
       expect(harness.scripting.executeScript).toHaveBeenCalledTimes(1);
     });
-    expect(harness.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(harness.tabs.sendMessage).toHaveBeenCalledExactlyOnceWith(
+      7,
+      { type: 'PREPARE_SNIP_CAPTURE' },
+      { frameId: 0 },
+    );
 
     initialization.resolve([{
       documentId: 'document-1',
@@ -870,7 +1052,7 @@ describe('service worker message integration', () => {
     ).type === 'START_SNIP')).toHaveLength(2);
   });
 
-  it('bounds stalled initialization and shows visible browser feedback', async () => {
+  it('bounds stalled initialization and falls back to a trusted workspace', async () => {
     vi.useFakeTimers();
     const harness = await loadWorker();
     harness.scripting.executeScript.mockReturnValueOnce(new Promise(() => undefined));
@@ -887,14 +1069,13 @@ describe('service worker message integration', () => {
       expect.objectContaining({ type: 'START_SNIP' }),
       expect.anything(),
     );
-    expect(harness.action.setBadgeText).toHaveBeenCalledWith({
-      tabId: 7,
-      text: '!',
-    });
-    expect(harness.action.setTitle).toHaveBeenCalledWith({
-      tabId: 7,
-      title: "SnapScreen couldn't start on this page. Reload it and try again.",
-    });
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    expect(harness.tabs.create).toHaveBeenCalledWith(expect.objectContaining({
+      active: true,
+      url: expect.stringContaining('chrome-extension://test-extension/src/workspace/workspace.html#'),
+      windowId: 2,
+    }));
+    expect(harness.action.setBadgeText).not.toHaveBeenCalledWith({ tabId: 7, text: '!' });
   });
 
   it('does not activate a replacement document after navigation during initialization', async () => {
@@ -930,9 +1111,10 @@ describe('service worker message integration', () => {
     );
   });
 
-  it('uses a badge rather than light-DOM injection when no content UI can receive an error', async () => {
+  it('uses a trusted workspace for chrome pages that reject content injection', async () => {
     const harness = await loadWorker();
-    harness.tabs.sendMessage.mockRejectedValueOnce(new Error('No receiver'));
+    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+    harness.scripting.executeScript.mockRejectedValue(new Error('Cannot access chrome://'));
     const restrictedTab = {
       ...trustedSender().tab!,
       url: 'chrome://settings',
@@ -940,13 +1122,12 @@ describe('service worker message integration', () => {
 
     harness.actionClicked.emit(restrictedTab);
     await vi.waitFor(() => {
-      expect(harness.action.setBadgeText).toHaveBeenCalledWith({
-        tabId: 7,
-        text: '!',
-      });
+      expect(harness.tabs.create).toHaveBeenCalledTimes(1);
     });
 
-    expect(harness.scripting.executeScript).not.toHaveBeenCalled();
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    expect(harness.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(harness.action.setBadgeText).not.toHaveBeenCalledWith({ tabId: 7, text: '!' });
   });
 
   it('surfaces isolated-frame startup failures in browser chrome', async () => {
@@ -967,55 +1148,461 @@ describe('service worker message integration', () => {
     expect(harness.tabs.sendMessage).not.toHaveBeenCalled();
   });
 
-  it('recognizes the current Chrome Web Store as a restricted page', async () => {
+  it('captures the Chrome Web Store into a trusted workspace', async () => {
     const harness = await loadWorker();
-    harness.tabs.sendMessage.mockRejectedValueOnce(new Error('No receiver'));
+    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+    harness.scripting.executeScript.mockRejectedValue(new Error('Cannot access Web Store'));
 
     harness.actionClicked.emit({
       ...trustedSender().tab!,
       url: 'https://chromewebstore.google.com/detail/example/abcdefghijklmnop',
     });
     await vi.waitFor(() => {
+      expect(harness.tabs.create).toHaveBeenCalledTimes(1);
+    });
+
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledTimes(1);
+    expect(harness.scripting.executeScript).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a data URL', 'data:text/html,<h1>Question</h1>'],
+    [
+      'the built-in PDF viewer',
+      'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html?file=https://example.test/test.pdf',
+    ],
+    ['another extension page', 'chrome-extension://abcdefghijklmnop/page.html'],
+    ['an unknown injection failure', 'https://example.test/unexpected-policy'],
+  ])('falls back to a workspace for %s', async (_label, url) => {
+    const harness = await loadWorker();
+    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+    harness.scripting.executeScript.mockRejectedValue(new Error('Injection denied'));
+
+    harness.actionClicked.emit({ ...trustedSender().tab!, url });
+    await vi.waitFor(() => expect(harness.tabs.create).toHaveBeenCalledTimes(1));
+
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    expect(harness.scripting.executeScript).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a friendly error when Chrome genuinely denies screenshot capture', async () => {
+    const harness = await loadWorker();
+    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+    harness.tabs.captureVisibleTab.mockRejectedValue(
+      new Error('Cannot capture a chrome:// page'),
+    );
+
+    harness.actionClicked.emit({
+      ...trustedSender().tab!,
+      url: 'chrome://certificate-viewer',
+    });
+    await vi.waitFor(() => {
       expect(harness.action.setTitle).toHaveBeenCalledWith({
         tabId: 7,
-        title: 'Cannot capture this page. SnapScreen supports regular HTTP and HTTPS pages only.',
+        title: expect.stringContaining('Chrome did not allow SnapScreen to capture'),
       });
     });
 
     expect(harness.scripting.executeScript).not.toHaveBeenCalled();
+    expect(harness.tabs.create).not.toHaveBeenCalled();
   });
 
-  it('rejects file pages before injecting an unusable UI session', async () => {
+  it('requests file access and captures an opted-in file page', async () => {
     const harness = await loadWorker();
-    harness.tabs.sendMessage.mockRejectedValueOnce(new Error('No receiver'));
+    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
+    harness.scripting.executeScript.mockRejectedValue(new Error('No receiver'));
 
     harness.actionClicked.emit({
       ...trustedSender().tab!,
       url: 'file:///tmp/question.html',
     });
     await vi.waitFor(() => {
-      expect(harness.action.setTitle).toHaveBeenCalledWith({
-        tabId: 7,
-        title: 'Cannot capture this page. SnapScreen supports regular HTTP and HTTPS pages only.',
+      expect(harness.tabs.create).toHaveBeenCalledTimes(1);
+    });
+
+    expect(harness.permissions.request).toHaveBeenCalledWith({ origins: ['file:///*'] });
+    expect(harness.extension.isAllowedFileSchemeAccess).toHaveBeenCalledTimes(1);
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens an actionable workspace error when file access is disabled', async () => {
+    const harness = await loadWorker();
+    harness.extension.isAllowedFileSchemeAccess.mockResolvedValue(false);
+
+    harness.actionClicked.emit({
+      ...trustedSender().tab!,
+      url: 'file:///tmp/question.html',
+    });
+    await vi.waitFor(() => {
+      expect(harness.tabs.create).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => expect(harness.storage.set).toHaveBeenCalled());
+
+    const workspaceUrl = new URL(
+      (harness.tabs.create.mock.calls[0]?.[0] as { url: string }).url,
+    );
+    const params = new URLSearchParams(workspaceUrl.hash.slice(1));
+    const sessionId = params.get('session')!;
+    const nonce = params.get('nonce')!;
+    const { ready } = await claimWorkspace(harness, sessionId, nonce);
+
+    expect(harness.permissions.request).toHaveBeenCalledWith({ origins: ['file:///*'] });
+    expect(harness.tabs.captureVisibleTab).not.toHaveBeenCalled();
+    expect(harness.scripting.executeScript).not.toHaveBeenCalled();
+    expect(ready.error).toEqual({
+      code: 'file_access_disabled',
+      message: expect.stringContaining('Allow access to file URLs'),
+    });
+  });
+
+  it('does not capture when the optional file permission is denied', async () => {
+    const harness = await loadWorker();
+    harness.permissions.request.mockResolvedValue(false);
+
+    harness.actionClicked.emit({
+      ...trustedSender().tab!,
+      url: 'file:///tmp/question.html',
+    });
+    await vi.waitFor(() => expect(harness.tabs.create).toHaveBeenCalledTimes(1));
+
+    expect(harness.extension.isAllowedFileSchemeAccess).not.toHaveBeenCalled();
+    expect(harness.tabs.captureVisibleTab).not.toHaveBeenCalled();
+    expect(harness.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('authenticates an exact workspace tab once and correlates crop responses', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port, ready } = await claimWorkspace(harness, sessionId, nonce);
+
+    expect(ready.initialMessage).toEqual(expect.objectContaining({
+      type: 'START_SNIP',
+      dataUrl: 'data:image/png;base64,FULL',
+    }));
+    expect(ready.reconnectToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(JSON.stringify(ready)).not.toContain('sk-ant-test-secret');
+
+    const replay = new FakePort(trustedWorkspaceSender());
+    harness.connect.emit(replay.port);
+    replay.send({
+      type: 'SNAPSCREEN_WORKSPACE_CLAIM',
+      sessionId,
+      nonce,
+      needsInitialState: true,
+    });
+    await vi.waitFor(() => expect(replay.disconnect).toHaveBeenCalledTimes(1));
+    expect(port.disconnect).not.toHaveBeenCalled();
+
+    port.send({
+      type: 'SNAPSCREEN_WORKSPACE_REQUEST',
+      sessionId,
+      requestId: 'crop-rpc-1',
+      message: {
+        ...captureRequest(ready.initialMessage!.captureId),
+        dataUrl: 'data:image/png;base64,WORKSPACE_OWNED',
+      },
+    });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+        sessionId,
+        requestId: 'crop-rpc-1',
+        response: { ok: true },
+      });
+    });
+    expect(dependencies.cropImage).toHaveBeenLastCalledWith(
+      'data:image/png;base64,WORKSPACE_OWNED',
+      { x: 0.1, y: 0.2, width: 0.5, height: 0.25 },
+    );
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'SNAPSCREEN_WORKSPACE_EVENT',
+      sessionId,
+      message: expect.objectContaining({
+        type: 'CROPPED_IMAGE',
+        captureId: ready.initialMessage!.captureId,
+      }),
+    });
+  });
+
+  it('expires unclaimed frozen screenshot bytes', async () => {
+    vi.useFakeTimers();
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const { ready } = await claimWorkspace(harness, sessionId, nonce);
+
+    expect(ready.initialMessage).toBeUndefined();
+    expect(ready.error).toEqual({
+      code: 'capture_expired',
+      message: expect.stringContaining('frozen screenshot expired'),
+    });
+  });
+
+  it('rejects workspace claims from the wrong path or tab', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const wrongPath = new FakePort(trustedWorkspaceSender(
+      70,
+      'chrome-extension://test-extension/src/options/options.html',
+    ));
+
+    harness.connect.emit(wrongPath.port);
+    expect(wrongPath.disconnect).toHaveBeenCalledTimes(1);
+
+    const wrongTab = new FakePort(trustedWorkspaceSender(71));
+    harness.connect.emit(wrongTab.port);
+    wrongTab.send({
+      type: 'SNAPSCREEN_WORKSPACE_CLAIM',
+      sessionId,
+      nonce,
+      needsInitialState: true,
+    });
+    await vi.waitFor(() => expect(wrongTab.disconnect).toHaveBeenCalledTimes(1));
+  });
+
+  it('reconnects an authenticated workspace without replaying frozen bytes', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port, ready } = await claimWorkspace(harness, sessionId, nonce);
+    port.port.disconnect();
+
+    const reconnected = new FakePort(trustedWorkspaceSender());
+    harness.connect.emit(reconnected.port);
+    reconnected.send({
+      type: 'SNAPSCREEN_WORKSPACE_CLAIM',
+      sessionId,
+      reconnectToken: ready.reconnectToken,
+      needsInitialState: false,
+    });
+    await vi.waitFor(() => {
+      expect(reconnected.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_READY',
+        sessionId,
+        reconnectToken: ready.reconnectToken,
+        initialMessage: undefined,
+        error: undefined,
+      });
+    });
+    expect(reconnected.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('cancels workspace generation work after a disconnected port does not reconnect', async () => {
+    vi.useFakeTimers();
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port, ready } = await claimWorkspace(harness, sessionId, nonce);
+    let generationSignal: AbortSignal | undefined;
+    dependencies.analyzeImage.mockImplementationOnce((
+      _apiKey,
+      _dataUrl,
+      options: { signal: AbortSignal },
+    ) => {
+      generationSignal = options.signal;
+      return rejectWhenAborted(options.signal);
+    });
+
+    port.send({
+      type: 'SNAPSCREEN_WORKSPACE_REQUEST',
+      sessionId,
+      requestId: 'disconnect-generation-rpc',
+      message: {
+        type: 'ANALYZE',
+        captureId: ready.initialMessage!.captureId,
+        dataUrl: 'data:image/png;base64,CROPPED',
+        requestId: 'disconnect-generation',
+        screenshotId: 'disconnect-screenshot',
+        sessionSettings: {
+          defaultPrompt: 'Answer the question.',
+          limits: testLimits,
+        },
+      },
+    });
+    await vi.waitFor(() => expect(generationSignal).toBeDefined());
+
+    port.port.disconnect();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(generationSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(generationSignal?.aborted).toBe(true);
+  });
+
+  it('cleans workspace routing metadata when its tab navigates away', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    await claimWorkspace(harness, sessionId, nonce);
+    harness.storage.remove.mockClear();
+
+    const optionsUrl = 'chrome-extension://test-extension/src/options/options.html';
+    harness.updated.emit(
+      70,
+      { status: 'loading', url: optionsUrl },
+      { ...trustedWorkspaceSender().tab!, url: optionsUrl },
+    );
+
+    await vi.waitFor(() => {
+      expect(harness.storage.remove).toHaveBeenCalledWith(
+        `snapscreenWorkspace:${sessionId}`,
+      );
+    });
+  });
+
+  it('reactivates the source and reuses the workspace for a new snip', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port } = await claimWorkspace(harness, sessionId, nonce);
+    harness.tabs.captureVisibleTab.mockClear();
+    port.postMessage.mockClear();
+
+    port.send({
+      type: 'SNAPSCREEN_WORKSPACE_REQUEST',
+      sessionId,
+      requestId: 'resnip-rpc-1',
+      message: {
+        type: 'REQUEST_SNIP',
+        sessionSettings: {
+          defaultPrompt: 'Keep this workspace prompt.',
+          limits: testLimits,
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+        sessionId,
+        requestId: 'resnip-rpc-1',
+        response: { ok: true },
+      });
+    });
+    expect(harness.tabs.update).toHaveBeenNthCalledWith(1, 7, { active: true });
+    expect(harness.tabs.captureVisibleTab).toHaveBeenCalledWith(2, { format: 'png' });
+    expect(harness.tabs.update).toHaveBeenNthCalledWith(2, 70, { active: true });
+    expect(harness.tabs.create).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'SNAPSCREEN_WORKSPACE_EVENT',
+      sessionId,
+      message: expect.objectContaining({
+        type: 'START_SNIP',
+        defaultPrompt: 'Keep this workspace prompt.',
+      }),
+    });
+  });
+
+  it('preserves workspace follow-ups but disables recapture after source closure', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port, ready } = await claimWorkspace(harness, sessionId, nonce);
+    port.postMessage.mockClear();
+
+    harness.removed.emit(7, { isWindowClosing: false, windowId: 2 });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_EVENT',
+        sessionId,
+        message: expect.objectContaining({
+          type: 'RESNIP_UNAVAILABLE',
+        }),
       });
     });
 
-    expect(harness.scripting.executeScript).not.toHaveBeenCalled();
+    const history = [
+      { role: 'user' as const, content: 'What is shown?' },
+      { role: 'assistant' as const, content: 'A settings page.' },
+    ];
+    port.send({
+      type: 'SNAPSCREEN_WORKSPACE_REQUEST',
+      sessionId,
+      requestId: 'follow-up-after-close',
+      message: {
+        type: 'FOLLOW_UP',
+        captureId: ready.initialMessage!.captureId,
+        requestId: 'generation-after-close',
+        screenshotId: 'screenshot-after-close',
+        sessionSettings: {
+          defaultPrompt: 'Answer the question.',
+          limits: testLimits,
+        },
+        history,
+        text: 'What section?',
+      },
+    });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+        sessionId,
+        requestId: 'follow-up-after-close',
+        response: { ok: true },
+      });
+    });
+    expect(dependencies.followUp).toHaveBeenCalledOnce();
+  });
+
+  it('rejects stale workspace recapture after source navigation', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId, sourceTab } = await openRestrictedWorkspace(harness);
+    const { port } = await claimWorkspace(harness, sessionId, nonce);
+    port.postMessage.mockClear();
+    harness.tabs.captureVisibleTab.mockClear();
+
+    harness.updated.emit(7, { status: 'loading' }, {
+      ...sourceTab,
+      url: 'chrome://settings/privacy',
+    });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith({
+        type: 'SNAPSCREEN_WORKSPACE_EVENT',
+        sessionId,
+        message: expect.objectContaining({ type: 'RESNIP_UNAVAILABLE' }),
+      });
+    });
+
+    port.send({
+      type: 'SNAPSCREEN_WORKSPACE_REQUEST',
+      sessionId,
+      requestId: 'stale-resnip-rpc',
+      message: {
+        type: 'REQUEST_SNIP',
+        sessionSettings: {
+          defaultPrompt: 'Keep prior context.',
+          limits: testLimits,
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'SNAPSCREEN_WORKSPACE_RESPONSE',
+        sessionId,
+        requestId: 'stale-resnip-rpc',
+        response: expect.objectContaining({
+          error: expect.stringContaining('source page changed'),
+        }),
+      }));
+    });
+    expect(harness.tabs.captureVisibleTab).not.toHaveBeenCalled();
+  });
+
+  it('closes the workspace after returning to its source tab', async () => {
+    const harness = await loadWorker();
+    const { nonce, sessionId } = await openRestrictedWorkspace(harness);
+    const { port } = await claimWorkspace(harness, sessionId, nonce);
+
+    port.send({ type: 'SNAPSCREEN_WORKSPACE_CLOSE', sessionId });
+    await vi.waitFor(() => expect(harness.tabs.remove).toHaveBeenCalledWith(70));
+    expect(harness.tabs.update).toHaveBeenCalledWith(7, { active: true });
+    expect(harness.storage.remove).toHaveBeenCalledWith(
+      `snapscreenWorkspace:${sessionId}`,
+    );
   });
 
   it('does not let an older badge timer clear a newer error', async () => {
     vi.useFakeTimers();
     const harness = await loadWorker();
-    harness.tabs.sendMessage.mockRejectedValue(new Error('No receiver'));
-    const restrictedTab = {
-      ...trustedSender().tab!,
-      url: 'chrome://settings',
-    };
 
-    harness.actionClicked.emit(restrictedTab);
+    void dispatch(harness, { type: 'UI_UNAVAILABLE' });
     await vi.waitFor(() => expect(harness.action.setBadgeText).toHaveBeenCalledTimes(1));
     await vi.advanceTimersByTimeAsync(4_000);
-    harness.actionClicked.emit(restrictedTab);
+    void dispatch(harness, { type: 'UI_UNAVAILABLE' });
     await vi.waitFor(() => expect(harness.action.setBadgeText).toHaveBeenCalledTimes(2));
     await vi.advanceTimersByTimeAsync(1_000);
 

@@ -2,20 +2,23 @@ import type { Rect } from './messages';
 
 export async function cropImage(
   dataUrl: string,
-  rect: Rect,
-  devicePixelRatio: number,
+  normalizedRect: Rect,
 ): Promise<string> {
-  validateCropRequest(rect, devicePixelRatio);
+  validateCropRequest(normalizedRect);
 
   const response = await fetch(dataUrl);
   const blob = await response.blob();
   const bitmap = await createImageBitmap(blob);
 
   try {
-    const requestedLeft = Math.round(rect.x * devicePixelRatio);
-    const requestedTop = Math.round(rect.y * devicePixelRatio);
-    const requestedRight = Math.round((rect.x + rect.width) * devicePixelRatio);
-    const requestedBottom = Math.round((rect.y + rect.height) * devicePixelRatio);
+    const requestedLeft = Math.round(normalizedRect.x * bitmap.width);
+    const requestedTop = Math.round(normalizedRect.y * bitmap.height);
+    const requestedRight = Math.round(
+      (normalizedRect.x + normalizedRect.width) * bitmap.width,
+    );
+    const requestedBottom = Math.round(
+      (normalizedRect.y + normalizedRect.height) * bitmap.height,
+    );
     if (
       ![requestedLeft, requestedTop, requestedRight, requestedBottom].every(Number.isFinite)
     ) {
@@ -45,18 +48,22 @@ export async function cropImage(
   }
 }
 
-function validateCropRequest(rect: Rect, devicePixelRatio: number): void {
+function validateCropRequest(rect: Rect): void {
+  const right = rect.x + rect.width;
+  const bottom = rect.y + rect.height;
   if (
     !Number.isFinite(rect.x) ||
     !Number.isFinite(rect.y) ||
     !Number.isFinite(rect.width) ||
     !Number.isFinite(rect.height) ||
-    !Number.isFinite(devicePixelRatio) ||
+    rect.x < 0 ||
+    rect.y < 0 ||
     rect.width <= 0 ||
     rect.height <= 0 ||
-    devicePixelRatio <= 0
+    right > 1 ||
+    bottom > 1
   ) {
-    throw new RangeError('Crop rectangle and device pixel ratio must be finite and positive.');
+    throw new RangeError('Normalized crop rectangle must be finite and contained in the image.');
   }
 }
 

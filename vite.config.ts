@@ -4,12 +4,13 @@ import manifest from './src/manifest.json';
 
 export default defineConfig({
   plugins: [crx({ manifest })],
-  // Vite 8 uses Rolldown. The frame is also listed as a web-accessible
-  // resource, but it must be an explicit HTML entry so its TS/CSS is bundled.
+  // Vite 8 uses Rolldown. Both packaged pages must be explicit HTML entries;
+  // only the injected result frame is web-accessible.
   build: {
     rolldownOptions: {
       input: {
         resultFrame: 'src/ui/result-frame.html',
+        workspace: 'src/workspace/workspace.html',
       },
     },
   },
